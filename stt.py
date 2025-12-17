@@ -26,6 +26,8 @@ from scipy.io import wavfile
 from pynput import keyboard
 import requests
 
+from providers import get_provider
+
 print(" ready.", flush=True)
 
 
@@ -119,6 +121,7 @@ LANGUAGE = os.environ.get("LANGUAGE", "en")
 HOTKEY = os.environ.get("HOTKEY", "cmd_r")  # Right Command by default
 PROMPT = os.environ.get("PROMPT", "")  # Context prompt for Whisper
 SOUND_ENABLED = os.environ.get("SOUND_ENABLED", "true").lower() == "true"
+PROVIDER = os.environ.get("PROVIDER", "mlx")  # "mlx" (local) or "groq" (cloud)
 SAMPLE_RATE = 16000  # Whisper expects 16kHz
 CHANNELS = 1
 
@@ -323,11 +326,12 @@ def select_audio_device():
 
 
 class STTApp:
-    def __init__(self, device=None):
+    def __init__(self, device=None, provider=None):
         self.recording = False
         self.audio_data = []
         self.stream = None
         self.device = device
+        self.provider = provider or get_provider(PROVIDER)
         
     def start_recording(self):
         """Start recording audio from microphone"""
@@ -402,35 +406,8 @@ class STTApp:
         return temp_file.name
     
     def transcribe_audio(self, audio_file_path):
-        """Send audio to Groq Whisper API for transcription"""
-        print("🔄 Transcribing...")
-        
-        url = "https://api.groq.com/openai/v1/audio/transcriptions"
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}"
-        }
-        
-        with open(audio_file_path, "rb") as audio_file:
-            files = {
-                "file": ("audio.wav", audio_file, "audio/wav")
-            }
-            data = {
-                "model": "whisper-large-v3",
-                "response_format": "text",
-                "language": LANGUAGE,
-            }
-            if PROMPT:
-                data["prompt"] = PROMPT
-            
-            try:
-                response = requests.post(url, headers=headers, files=files, data=data)
-                response.raise_for_status()
-                return response.text.strip()
-            except requests.exceptions.RequestException as e:
-                print(f"❌ API Error: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    print(f"Response: {e.response.text}")
-                return None
+        """Transcribe audio using the configured provider"""
+        return self.provider.transcribe(audio_file_path, LANGUAGE, PROMPT)
     
     def transform_text(self, text):
         """Apply text transformations"""
@@ -530,8 +507,27 @@ def main():
     print("Press ESC while recording to cancel, Ctrl+C to quit")
     print("=" * 50)
 
-    if not GROQ_API_KEY:
-        setup_wizard()
+    # Initialize provider
+    try:
+        provider = get_provider(PROVIDER)
+    except ValueError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
+
+    if not provider.is_available():
+        if PROVIDER == "groq" and not GROQ_API_KEY:
+            setup_wizard()
+            provider = get_provider(PROVIDER)
+        else:
+            print(f"❌ Provider '{PROVIDER}' is not available")
+            if PROVIDER == "mlx":
+                print("   Install with: pip install mlx-whisper")
+            sys.exit(1)
+
+    print(f"✓ Provider: {provider.name}")
+
+    # Warmup provider (downloads/loads model if needed)
+    provider.warmup()
 
     # Select audio device
     device = select_audio_device()
@@ -540,7 +536,7 @@ def main():
     else:
         print(f"\n✓ Using default device")
 
-    app = STTApp(device=device)
+    app = STTApp(device=device, provider=provider)
     key_pressed = False
     shift_held = False
     send_enter_flag = False

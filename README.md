@@ -2,7 +2,7 @@
 
 Voice-to-text for macOS. Hold a key, speak, release — your words appear wherever your cursor is.
 
-Built for vibe coding and conversations with AI agents. Uses the Groq Whisper API for fast, accurate transcription.
+Built for vibe coding and conversations with AI agents. Supports cloud (Groq API) or local (MLX Whisper) transcription.
 
 ## Features
 
@@ -17,9 +17,9 @@ Built for vibe coding and conversations with AI agents. Uses the Groq Whisper AP
 
 ## Requirements
 
-- macOS
-- [Groq API key](https://console.groq.com) (free tier available)
+- macOS with Apple Silicon (M1/M2/M3/M4)
 - [UV](https://docs.astral.sh/uv/) package manager
+- **For cloud mode (optional):** [Groq API key](https://console.groq.com)
 
 ## Installation
 
@@ -62,7 +62,10 @@ stt
 Settings are stored in `~/.config/stt/.env`. Run `stt --config` to reconfigure, or edit directly:
 
 ```bash
-# Required
+# Transcription provider: "mlx" (local, default) or "groq" (cloud)
+PROVIDER=mlx
+
+# Required for cloud mode only
 GROQ_API_KEY=gsk_...
 
 # Audio device (saved automatically after first selection)
@@ -80,6 +83,23 @@ PROMPT=Claude, Anthropic, TypeScript, React, Python
 # Disable audio feedback sounds
 SOUND_ENABLED=true
 ```
+
+### Local Mode (MLX) — Default
+
+Local transcription uses Apple Silicon GPU acceleration via MLX. On first run, the Whisper large-v3 model (~3GB) will be downloaded and cached. Subsequent runs load from cache.
+
+Runs completely offline — no API key required.
+
+### Cloud Mode (Groq)
+
+To use cloud transcription instead:
+
+```bash
+PROVIDER=groq
+GROQ_API_KEY=gsk_...
+```
+
+Requires a [Groq API key](https://console.groq.com) (free tier available).
 
 ### Prompt Examples
 
