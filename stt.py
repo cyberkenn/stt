@@ -125,15 +125,12 @@ PROVIDER = os.environ.get("PROVIDER", "mlx")  # "mlx" (local) or "groq" (cloud)
 SAMPLE_RATE = 16000  # Whisper expects 16kHz
 CHANNELS = 1
 
-# Map config string to pynput key
-HOTKEY_MAP = {
-    "cmd_r": keyboard.Key.cmd_r,
-    "cmd_l": keyboard.Key.cmd_l,
-    "alt_r": keyboard.Key.alt_r,
-    "alt_l": keyboard.Key.alt_l,
-    "ctrl_r": keyboard.Key.ctrl_r,
-    "ctrl_l": keyboard.Key.ctrl_l,
-    "shift_r": keyboard.Key.shift_r,
+# Hotkey configuration
+HOTKEYS = {
+    "cmd_r": {"key": keyboard.Key.cmd_r, "name": "Right ⌘"},
+    "alt_r": {"key": keyboard.Key.alt_r, "name": "Right ⌥"},
+    "ctrl_r": {"key": keyboard.Key.ctrl_r, "name": "Right ⌃"},
+    "shift_r": {"key": keyboard.Key.shift_r, "name": "Right ⇧"},
 }
 
 # macOS system sounds
@@ -190,7 +187,7 @@ def mask_api_key(key):
 
 def setup_wizard():
     """First-time setup wizard"""
-    global GROQ_API_KEY, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER
+    global GROQ_API_KEY, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER, AUDIO_DEVICE
 
     print("\n" + "=" * 50)
     print("STT Configuration")
@@ -279,10 +276,10 @@ def setup_wizard():
 
     # Hotkey
     default_hotkey = HOTKEY or "cmd_r"
-    print(f"\nHotkey options: cmd_r, cmd_l, alt_r, alt_l, ctrl_r, ctrl_l, shift_r")
+    print(f"\nHotkey options: cmd_r, alt_r, ctrl_r, shift_r")
     hotkey = input(f"Hotkey [{default_hotkey}]: ").strip().lower()
     if hotkey and hotkey != default_hotkey:
-        if hotkey in HOTKEY_MAP:
+        if hotkey in HOTKEYS:
             save_config("HOTKEY", hotkey)
             HOTKEY = hotkey
             print(f"Hotkey set to: {hotkey}")
@@ -308,12 +305,62 @@ def setup_wizard():
         save_config("SOUND_ENABLED", str(SOUND_ENABLED).lower())
         print(f"Sound {'enabled' if SOUND_ENABLED else 'disabled'}")
 
+    # Audio device
+    devices = sd.query_devices()
+    input_devices = []
+    for i, dev in enumerate(devices):
+        if dev['max_input_channels'] > 0:
+            input_devices.append((i, dev))
+
+    if input_devices:
+        print("\nAvailable input devices:")
+        default_device_id = sd.default.device[0]
+        default_device_name = devices[default_device_id]['name'] if default_device_id is not None else None
+
+        # Find current device by name
+        current_device_idx = None
+        if AUDIO_DEVICE:
+            for i, dev in input_devices:
+                if dev['name'] == AUDIO_DEVICE:
+                    current_device_idx = i
+                    break
+
+        for i, dev in input_devices:
+            markers = []
+            if i == default_device_id:
+                markers.append("system default")
+            if current_device_idx is not None and i == current_device_idx:
+                markers.append("current")
+            marker_str = f" ({', '.join(markers)})" if markers else ""
+            print(f"  [{i}] {dev['name']}{marker_str}")
+
+        prompt_default = current_device_idx if current_device_idx is not None else default_device_id
+        device_choice = input(f"\nSelect device number [{prompt_default}]: ").strip()
+        if device_choice:
+            try:
+                new_device_idx = int(device_choice)
+                matching = [(i, d) for i, d in input_devices if i == new_device_idx]
+                if matching:
+                    new_device_name = matching[0][1]['name']
+                    if new_device_name != AUDIO_DEVICE:
+                        save_config("AUDIO_DEVICE", new_device_name)
+                        AUDIO_DEVICE = new_device_name
+                        print(f"Audio device set to: {new_device_name}")
+                else:
+                    print("Invalid device number, keeping current setting")
+            except ValueError:
+                print("Invalid input, keeping current setting")
+        elif not AUDIO_DEVICE:
+            # Save default device if nothing was configured before
+            save_config("AUDIO_DEVICE", default_device_name)
+            AUDIO_DEVICE = default_device_name
+
     print("\nConfiguration complete!\n")
 
 
-def save_device_to_env(device_id):
-    """Save device ID to config file"""
-    env_path = save_config("AUDIO_DEVICE", device_id)
+def save_device_to_env(device_name):
+    """Save device name to config file"""
+    env_path = save_config("AUDIO_DEVICE", device_name)
     print(f"  (saved to {env_path})")
 
 def select_audio_device():
@@ -325,15 +372,12 @@ def select_audio_device():
         if dev['max_input_channels'] > 0:
             input_devices.append((i, dev))
 
-    # Check if device is saved in .env
+    # Check if device is saved in .env (by name)
     if AUDIO_DEVICE:
-        try:
-            device_id = int(AUDIO_DEVICE)
-            if any(d[0] == device_id for d in input_devices):
-                return device_id
-            print(f"⚠️  Saved device {device_id} not found, please select again")
-        except ValueError:
-            pass
+        for i, dev in input_devices:
+            if dev['name'] == AUDIO_DEVICE:
+                return i
+        print(f"⚠️  Saved device '{AUDIO_DEVICE}' not found, please select again")
 
     print("\nAvailable input devices:")
     for i, dev in input_devices:
@@ -347,13 +391,15 @@ def select_audio_device():
         if choice == "":
             return None  # Use default
         try:
-            device_id = int(choice)
-            if any(d[0] == device_id for d in input_devices):
+            device_idx = int(choice)
+            matching = [(i, d) for i, d in input_devices if i == device_idx]
+            if matching:
+                device_name = matching[0][1]['name']
                 # Ask to save
                 save = input("Save this device for future use? [y/N]: ").strip().lower()
                 if save == "y":
-                    save_device_to_env(device_id)
-                return device_id
+                    save_device_to_env(device_name)
+                return device_idx
             print("Invalid device number")
         except ValueError:
             print("Please enter a number")
@@ -442,7 +488,12 @@ class STTApp:
     def transcribe_audio(self, audio_file_path):
         """Transcribe audio using the configured provider"""
         return self.provider.transcribe(audio_file_path, LANGUAGE, PROMPT)
-    
+
+    def print_ready_prompt(self):
+        """Print the ready prompt with hotkey name"""
+        hotkey_name = HOTKEYS[HOTKEY]["name"] if HOTKEY in HOTKEYS else HOTKEY
+        print(f"Press [{hotkey_name}] to record")
+
     def transform_text(self, text):
         """Apply text transformations"""
         # Convert "slash command" to "/command"
@@ -485,26 +536,27 @@ class STTApp:
 
         if audio is None or len(audio) < SAMPLE_RATE * 0.5:  # Less than 0.5 seconds
             print("⚠️  Recording too short, skipping...")
-            return
+        else:
+            # Save to temp file
+            wav_path = self.save_audio_to_wav(audio)
 
-        # Save to temp file
-        wav_path = self.save_audio_to_wav(audio)
+            try:
+                # Transcribe
+                text = self.transcribe_audio(wav_path)
 
-        try:
-            # Transcribe
-            text = self.transcribe_audio(wav_path)
+                if text:
+                    # Process text transformations
+                    text = self.transform_text(text)
+                    # Type the result
+                    self.type_text(text, send_enter=send_enter)
+                    print(f"✅ Done: {text}")
+                else:
+                    print("⚠️  No transcription returned")
+            finally:
+                # Clean up temp file
+                os.unlink(wav_path)
 
-            if text:
-                # Process text transformations
-                text = self.transform_text(text)
-                # Type the result
-                self.type_text(text, send_enter=send_enter)
-                print(f"✅ Done: {text}")
-            else:
-                print("⚠️  No transcription returned")
-        finally:
-            # Clean up temp file
-            os.unlink(wav_path)
+        self.print_ready_prompt()
 
 
 def main():
@@ -535,8 +587,8 @@ def main():
         print("\n   Then restart this app.")
         sys.exit(1)
 
-    hotkey_name = HOTKEY.replace("_", " ").upper()
-    print(f"Hold {hotkey_name} to record, release to transcribe")
+    hotkey_name = HOTKEYS[HOTKEY]["name"] if HOTKEY in HOTKEYS else HOTKEY
+    print(f"Press [{hotkey_name}] to record, release to transcribe")
     print("Hold LEFT SHIFT while recording to also send Enter")
     print("Press ESC while recording to cancel, Ctrl+C to quit")
     print("=" * 50)
@@ -571,10 +623,11 @@ def main():
         print(f"\n✓ Using default device")
 
     app = STTApp(device=device, provider=provider)
+    app.print_ready_prompt()
     key_pressed = False
     shift_held = False
     send_enter_flag = False
-    trigger_key = HOTKEY_MAP.get(HOTKEY, keyboard.Key.cmd_r)
+    trigger_key = HOTKEYS[HOTKEY]["key"] if HOTKEY in HOTKEYS else keyboard.Key.cmd_r
 
     def on_press(key):
         nonlocal key_pressed, shift_held, send_enter_flag
