@@ -475,7 +475,7 @@ class STTApp:
                     self.stream = stream
                 else:
                     # Recording was cancelled while starting
-                    stream.stop()
+                    stream.abort()
                     stream.close()
         except Exception as e:
             print(f"❌ Failed to start recording: {e}")
@@ -501,9 +501,10 @@ class STTApp:
         print("⏹️  Stopped recording")
 
         # Stop stream outside lock to avoid deadlock with audio callback
+        # Use abort() instead of stop() - stop() waits for pending buffers which can hang
         if stream:
             try:
-                stream.stop()
+                stream.abort()  # Immediate termination, no waiting
                 stream.close()
             except Exception as e:
                 print(f"⚠️  Error closing stream: {e}")
@@ -531,9 +532,10 @@ class STTApp:
         play_sound(SOUND_CANCEL)
         print("❌ Recording cancelled")
 
+        # Use abort() instead of stop() - stop() waits for pending buffers which can hang
         if stream:
             try:
-                stream.stop()
+                stream.abort()  # Immediate termination, no waiting
                 stream.close()
             except Exception as e:
                 print(f"⚠️  Error closing stream: {e}")
@@ -709,38 +711,54 @@ def main():
 
     def on_press(key):
         nonlocal key_pressed, shift_held, send_enter_flag
-
-        if key == keyboard.Key.shift_l:
-            shift_held = True
-            # If already recording, mark for enter
-            if app.recording:
-                send_enter_flag = True
-        elif key == trigger_key:
-            if not key_pressed:
-                key_pressed = True
-                # Check if shift is already held when starting
-                send_enter_flag = shift_held
-                # Start recording in background thread to avoid blocking keyboard listener
-                threading.Thread(target=app.start_recording, daemon=True).start()
-        elif key == keyboard.Key.esc:
-            if app.recording:
-                key_pressed = False
-                send_enter_flag = False
-                # Cancel recording in background thread to avoid blocking keyboard listener
-                threading.Thread(target=app.cancel_recording, daemon=True).start()
+        try:
+            if key == keyboard.Key.shift_l:
+                shift_held = True
+                # If already recording, mark for enter
+                if app.recording:
+                    send_enter_flag = True
+            elif key == trigger_key:
+                if not key_pressed:
+                    key_pressed = True
+                    # Check if shift is already held when starting
+                    send_enter_flag = shift_held
+                    # Start recording in background thread to avoid blocking keyboard listener
+                    threading.Thread(target=app.start_recording, daemon=True).start()
+            elif key == keyboard.Key.esc:
+                if app.recording:
+                    key_pressed = False
+                    send_enter_flag = False
+                    # Cancel recording in background thread to avoid blocking keyboard listener
+                    threading.Thread(target=app.cancel_recording, daemon=True).start()
+        except Exception as e:
+            print(f"⚠️  Error in key press handler: {e}")
+            # Reset state on error to prevent stuck keys
+            key_pressed = False
+            send_enter_flag = False
 
     def on_release(key):
         nonlocal key_pressed, shift_held, send_enter_flag
-
-        if key == keyboard.Key.shift_l:
-            shift_held = False
-        elif key == trigger_key:
-            if key_pressed:
-                key_pressed = False
-                send_enter = send_enter_flag
-                send_enter_flag = False
-                # Process in a separate thread to not block the listener
-                threading.Thread(target=app.process_recording, args=(send_enter,)).start()
+        try:
+            if key == keyboard.Key.shift_l:
+                shift_held = False
+                return
+            # Check for trigger key release. Also accept generic 'cmd' when trigger is cmd_r,
+            # because macOS reports ambiguous releases (e.g., releasing cmd_r while cmd_l is held)
+            # as generic 'cmd' which doesn't match cmd_r specifically.
+            is_cmd_trigger = trigger_key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r)
+            is_cmd_release = key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r)
+            if key == trigger_key or (key_pressed and is_cmd_trigger and is_cmd_release):
+                if key_pressed:
+                    key_pressed = False
+                    send_enter = send_enter_flag
+                    send_enter_flag = False
+                    # Process in a separate thread to not block the listener
+                    threading.Thread(target=app.process_recording, args=(send_enter,)).start()
+        except Exception as e:
+            print(f"⚠️  Error in key release handler: {e}")
+            # Reset state on error to prevent stuck keys
+            key_pressed = False
+            send_enter_flag = False
 
     # Start the keyboard listener in a background thread
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
