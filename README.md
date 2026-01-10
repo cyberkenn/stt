@@ -2,7 +2,7 @@
 
 Voice-to-text for macOS. Hold a key, speak, release — your words appear wherever your cursor is.
 
-Built for vibe coding and conversations with AI agents. Supports cloud (Groq API) or local (MLX Whisper) transcription.
+Built for vibe coding and conversations with AI agents. Supports cloud (Groq API) or local transcription (MLX Whisper, Parakeet).
 
 ## Features
 
@@ -62,7 +62,7 @@ stt
 Settings are stored in `~/.config/stt/.env`. Run `stt --config` to reconfigure, or edit directly:
 
 ```bash
-# Transcription provider: "mlx" (local, default) or "groq" (cloud)
+# Transcription provider: "mlx" (default), "parakeet", or "groq"
 PROVIDER=mlx
 
 # Required for cloud mode only
@@ -84,11 +84,25 @@ PROMPT=Claude, Anthropic, TypeScript, React, Python
 SOUND_ENABLED=true
 ```
 
-### Local Mode (MLX) — Default
+### Local Mode (MLX Whisper) — Default
 
 Local transcription uses Apple Silicon GPU acceleration via MLX. On first run, the Whisper large-v3 model (~3GB) will be downloaded and cached. Subsequent runs load from cache.
 
-Runs completely offline — no API key required.
+Runs completely offline — no API key required. Supports 99 languages and context prompts.
+
+### Local Mode (Parakeet)
+
+Nvidia's Parakeet model via MLX. Faster than Whisper (~3000x realtime factor) with comparable accuracy.
+
+```bash
+PROVIDER=parakeet
+```
+
+On first run, the model (~2.5GB) will be downloaded and cached.
+
+**Limitations:**
+- English only
+- No prompt support (PROMPT setting is ignored)
 
 ### Cloud Mode (Groq)
 

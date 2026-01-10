@@ -344,14 +344,18 @@ def setup_wizard():
 
     # Provider selection
     default_provider = PROVIDER or "mlx"
+    provider_defaults = {"mlx": "1", "groq": "2", "parakeet": "3"}
     print("\nProviders:")
-    print("  [1] mlx  - Local (Apple Silicon, no internet required)")
-    print("  [2] groq - Cloud (fast, requires API key)")
-    provider_choice = input(f"Select provider [{'1' if default_provider == 'mlx' else '2'}]: ").strip()
+    print("  [1] mlx      - Local MLX Whisper (Apple Silicon)")
+    print("  [2] groq     - Cloud (fast, requires API key)")
+    print("  [3] parakeet - Local Nvidia Parakeet (Apple Silicon, English-only)")
+    provider_choice = input(f"Select provider [{provider_defaults.get(default_provider, '1')}]: ").strip()
     if provider_choice == "1":
         PROVIDER = "mlx"
     elif provider_choice == "2":
         PROVIDER = "groq"
+    elif provider_choice == "3":
+        PROVIDER = "parakeet"
     # else keep default
 
     if PROVIDER != default_provider:
@@ -412,16 +416,22 @@ def setup_wizard():
 
     # Language
     default_lang = LANGUAGE or "en"
-    print(f"\nLanguage codes: en, es, de, fr, it, pt, ja, etc.")
-    lang = input(f"Language [{default_lang}]: ").strip().lower()
-    if lang and lang != default_lang:
-        save_config("LANGUAGE", lang)
-        LANGUAGE = lang
-        print(f"Language set to: {lang}")
-    elif not lang:
-        if not LANGUAGE:
+    if PROVIDER == "parakeet":
+        print("\n[Parakeet is English-only, language set to 'en']")
+        if LANGUAGE != "en":
             save_config("LANGUAGE", "en")
             LANGUAGE = "en"
+    else:
+        print(f"\nLanguage codes: en, es, de, fr, it, pt, ja, etc.")
+        lang = input(f"Language [{default_lang}]: ").strip().lower()
+        if lang and lang != default_lang:
+            save_config("LANGUAGE", lang)
+            LANGUAGE = lang
+            print(f"Language set to: {lang}")
+        elif not lang:
+            if not LANGUAGE:
+                save_config("LANGUAGE", "en")
+                LANGUAGE = "en"
 
     # Hotkey
     default_hotkey = HOTKEY or "cmd_r"
