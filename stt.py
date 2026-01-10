@@ -354,15 +354,19 @@ def setup_wizard():
     print("  [2] groq     - Cloud (fast, requires API key)")
     print("  [3] parakeet - Local Nvidia Parakeet (Apple Silicon, English-only)")
     provider_choice = input(f"Select provider [{provider_defaults.get(default_provider, '1')}]: ").strip()
+    provider_changed = False
     if provider_choice == "1":
         PROVIDER = "mlx"
+        provider_changed = True
     elif provider_choice == "2":
         PROVIDER = "groq"
+        provider_changed = True
     elif provider_choice == "3":
         PROVIDER = "parakeet"
+        provider_changed = True
     # else keep default
 
-    if PROVIDER != default_provider:
+    if provider_changed:
         save("PROVIDER", PROVIDER)
         print(f"Provider set to: {PROVIDER}")
 
