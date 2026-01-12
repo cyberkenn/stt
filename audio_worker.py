@@ -23,6 +23,10 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+WAVEFORM_BARS = 24
+WAVEFORM_INTERVAL_S = 0.033  # ~30fps
+
+
 class Recorder:
     def __init__(self):
         self._recording = False
@@ -30,11 +34,15 @@ class Recorder:
         self._chunks = []
         self._sample_rate = None
         self._channels = None
+        self._last_waveform_time = 0.0
+        self._waveform_buffer = []
+        self._peak_level = 0.01  # Auto-normalizing peak (starts low)
 
     def start(self, *, device: int | None, sample_rate: int, channels: int) -> None:
         if self._recording:
             raise RuntimeError("Already recording")
 
+        import time
         import numpy as np
         import sounddevice as sd
 
@@ -42,12 +50,22 @@ class Recorder:
         self._sample_rate = sample_rate
         self._channels = channels
         self._recording = True
+        self._last_waveform_time = time.time()
+        self._waveform_buffer = []
+        self._peak_level = 0.01  # Reset peak for new recording
 
-        def callback(indata, frames, time, status):
+        def callback(indata, frames, time_info, status):
             if status:
                 _log(f"[stt:audio-worker] Status: {status}")
             if self._recording:
                 self._chunks.append(indata.copy())
+                self._waveform_buffer.append(indata.copy())
+
+                # Send waveform at interval
+                now = time.time()
+                if now - self._last_waveform_time >= WAVEFORM_INTERVAL_S:
+                    self._last_waveform_time = now
+                    self._send_waveform(np)
 
         stream = sd.InputStream(
             device=device,
@@ -58,6 +76,55 @@ class Recorder:
         )
         stream.start()
         self._stream = stream
+
+    def _send_waveform(self, np) -> None:
+        """Calculate and send waveform data with auto-normalization"""
+        if not self._waveform_buffer:
+            return
+
+        # Concatenate recent audio
+        audio = np.concatenate(self._waveform_buffer, axis=0)
+        self._waveform_buffer = []
+
+        # Take absolute values and flatten to mono
+        if audio.ndim > 1:
+            audio = audio[:, 0]
+        audio = np.abs(audio)
+
+        # Downsample to WAVEFORM_BARS values
+        samples_per_bar = len(audio) // WAVEFORM_BARS
+        if samples_per_bar < 1:
+            samples_per_bar = 1
+
+        raw_values = []
+        for i in range(WAVEFORM_BARS):
+            start = i * samples_per_bar
+            end = start + samples_per_bar
+            if end > len(audio):
+                end = len(audio)
+            if start < len(audio):
+                # Use RMS for smoother visualization
+                chunk = audio[start:end]
+                rms = float(np.sqrt(np.mean(chunk ** 2)))
+                raw_values.append(rms)
+            else:
+                raw_values.append(0.0)
+
+        # Auto-normalize: track peak and scale to it
+        current_max = max(raw_values) if raw_values else 0
+        if current_max > self._peak_level:
+            # Quick attack: immediately raise peak
+            self._peak_level = current_max
+        else:
+            # Slow decay: gradually lower peak for consistent visualization
+            self._peak_level = self._peak_level * 0.995 + current_max * 0.005
+            # Don't let it drop too low
+            self._peak_level = max(self._peak_level, 0.005)
+
+        # Normalize values to 0-1 range based on peak
+        values = [min(1.0, v / self._peak_level * 0.85) for v in raw_values]
+
+        _write_json({"type": "waveform", "values": values})
 
     def stop(self, *, wav_path: str) -> int:
         if not self._recording:

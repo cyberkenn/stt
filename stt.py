@@ -34,6 +34,7 @@ from watchdog.events import FileSystemEventHandler
 
 from providers import get_provider
 from menubar import STTMenuBar
+from overlay import get_overlay
 
 print(" ready.", flush=True)
 
@@ -584,6 +585,11 @@ class _AudioWorkerClient:
         self._lock = threading.Lock()
         self._next_id = 1
         self._cleanup_registered = False
+        self._waveform_callback: Optional[Callable[[list[float]], None]] = None
+
+    def set_waveform_callback(self, callback: Optional[Callable[[list[float]], None]]):
+        """Set callback for waveform updates"""
+        self._waveform_callback = callback
 
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -693,7 +699,15 @@ class _AudioWorkerClient:
             if not line:
                 continue
             try:
-                messages.put(json.loads(line))
+                msg = json.loads(line)
+                # Handle waveform messages via callback (don't queue)
+                if msg.get("type") == "waveform" and self._waveform_callback:
+                    try:
+                        self._waveform_callback(msg.get("values", []))
+                    except Exception:
+                        pass
+                else:
+                    messages.put(msg)
             except json.JSONDecodeError:
                 messages.put({"type": "stdout", "line": line})
         messages.put({"type": "eof"})
@@ -839,6 +853,10 @@ class STTApp:
         self.device = device
         self.provider = provider or get_provider(PROVIDER)
         self._audio_worker = _AudioWorkerClient()
+        self._overlay = get_overlay()
+
+        # Set up waveform callback to update overlay
+        self._audio_worker.set_waveform_callback(self._on_waveform)
 
         # Thread synchronization
         self._lock = threading.Lock()
@@ -854,6 +872,10 @@ class STTApp:
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._watchdog_thread.start()
+
+    def _on_waveform(self, values: list[float]):
+        """Handle waveform data from audio worker"""
+        self._overlay.update_waveform(values)
 
     def _watchdog_loop(self):
         """Monitor for stuck states and recover if needed"""
@@ -871,6 +893,11 @@ class STTApp:
         self._starting = False
         self.recording = False
         self._operation_start_time = None
+        # Hide overlay
+        try:
+            self._overlay.hide()
+        except Exception:
+            pass
         # Force restart workers
         try:
             self._audio_worker.stop(force=True)
@@ -913,6 +940,7 @@ class STTApp:
             self._operation_start_time = time.time()
 
         self._set_state(AppState.RECORDING)
+        self._overlay.show()
         play_sound(SOUND_START)
         print("🎤 Recording...")
 
@@ -928,6 +956,7 @@ class STTApp:
         except Exception as e:
             print(f"❌ Failed to start recording: {e}")
             self._audio_worker.stop(force=True)
+            self._overlay.hide()
             with self._lock:
                 self.recording = False
                 self._operation_start_time = None
@@ -944,6 +973,7 @@ class STTApp:
             self.recording = False
             starting = self._starting
 
+        self._overlay.set_transcribing(True)
         play_sound(SOUND_STOP)
         print("⏹️  Stopped recording")
 
@@ -984,12 +1014,14 @@ class STTApp:
                 # Even if not recording, ensure state is IDLE (fallback safeguard)
                 if self._state == AppState.RECORDING:
                     self._set_state(AppState.IDLE)
+                    self._overlay.hide()
                 self._operation_start_time = None
                 return
             self.recording = False
             self._operation_start_time = None
 
         self._set_state(AppState.IDLE)
+        self._overlay.hide()
         play_sound(SOUND_CANCEL)
         print("❌ Recording cancelled")
         try:
@@ -1115,7 +1147,9 @@ class STTApp:
                     os.unlink(wav_path)
                 except OSError:
                     pass
-            # Always reset state to IDLE
+            # Hide overlay and reset state
+            self._overlay.set_transcribing(False)
+            self._overlay.hide()
             self._set_state(AppState.IDLE)
             with self._lock:
                 self._processing = False
@@ -1198,14 +1232,17 @@ def main():
         try:
             if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
                 shift_held = True
-                # If already recording, mark for enter
-                if app.recording:
+                # If already recording, mark for enter and show indicator (stays visible)
+                if app.recording and not send_enter_flag:
                     send_enter_flag = True
+                    app._overlay.set_shift_held(True)
             elif key == trigger_key:
                 if not key_pressed:
                     key_pressed = True
                     # Check if shift is already held when starting
                     send_enter_flag = shift_held
+                    if shift_held:
+                        app._overlay.set_shift_held(True)
                     # Start recording in background thread to avoid blocking keyboard listener
                     threading.Thread(target=app.start_recording, daemon=True).start()
             elif key == keyboard.Key.esc:
@@ -1227,6 +1264,7 @@ def main():
         try:
             if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
                 shift_held = False
+                # Don't hide enter icon - it stays visible once activated
                 return
             # Check for trigger key release. Also accept generic 'cmd' when trigger is cmd_r,
             # because macOS reports ambiguous releases (e.g., releasing cmd_r while cmd_l is held)
