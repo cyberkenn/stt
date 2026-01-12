@@ -1080,24 +1080,39 @@ class STTApp:
         return text
 
     def type_text(self, text, send_enter=False):
-        """Type text into the active text field using AppleScript"""
+        """Type text into the active text field using clipboard paste (fast)"""
         if not text:
             return
 
         print(f"⌨️  Typing: {text}" + (" [+Enter]" if send_enter else ""))
 
-        # Escape special characters for AppleScript
-        escaped_text = text.replace('\\', '\\\\').replace('"', '\\"')
-
-        # Use AppleScript to type the text
-        script = f'''
-        tell application "System Events"
-            keystroke "{escaped_text}"
-        end tell
-        '''
-
         try:
-            subprocess.run(["osascript", "-e", script], check=True, timeout=10)
+            # Save current clipboard
+            old_clipboard = subprocess.run(
+                ["pbpaste"], capture_output=True, timeout=2
+            ).stdout
+
+            # Copy text to clipboard
+            subprocess.run(
+                ["pbcopy"], input=text.encode("utf-8"), check=True, timeout=2
+            )
+
+            # Paste via Cmd+V
+            paste_script = '''
+            tell application "System Events"
+                keystroke "v" using command down
+            end tell
+            '''
+            subprocess.run(["osascript", "-e", paste_script], check=True, timeout=5)
+
+            # Small delay to let paste complete before restoring clipboard
+            time.sleep(0.05)
+
+            # Restore original clipboard
+            subprocess.run(
+                ["pbcopy"], input=old_clipboard, check=True, timeout=2
+            )
+
             if send_enter:
                 enter_script = '''
                 tell application "System Events"
@@ -1105,8 +1120,9 @@ class STTApp:
                 end tell
                 '''
                 subprocess.run(["osascript", "-e", enter_script], check=True, timeout=5)
+
         except subprocess.TimeoutExpired:
-            print("❌ Typing timed out (osascript hung)")
+            print("❌ Typing timed out")
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed to type text: {e}")
     
