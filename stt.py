@@ -1191,7 +1191,7 @@ def main():
     else:
         console.print(f"[green]✓[/green] Device: [cyan]System default[/cyan]")
 
-    console.print("[dim]  Run stt --config to change settings[/dim]")
+    console.print("[bright_black]Hint:[/bright_black] [dim]Run[/dim] [grey70]stt --config[/grey70] [dim]to change settings[/dim]")
 
     console.print()
     console.print(f"[bold green]Ready[/bold green] [dim]│[/dim] Hold [cyan]{hotkey_name}[/cyan] to record, +Shift ↵, Esc ✗")
