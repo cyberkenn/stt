@@ -34,6 +34,8 @@ TERMINAL_APPS = {
     "kitty": "Kitty",
     "rio": "Rio",
     "ghostty": "Ghostty",
+    "WezTerm": "WezTerm",
+    "wezterm-gui": "WezTerm",
 }
 
 
@@ -41,39 +43,28 @@ def get_terminal_app() -> str:
     """Detect the current terminal application."""
     term_program = os.environ.get("TERM_PROGRAM", "")
 
-    # If running under tmux/screen, try to find the real terminal
+    # If running under tmux/screen, env vars are unreliable (may be from old session)
+    # Use frontmost app detection instead
     if term_program in ("tmux", "screen", ""):
-        # Try LC_TERMINAL (set by some terminals like iTerm2)
-        lc_terminal = os.environ.get("LC_TERMINAL", "")
-        if lc_terminal:
-            if lc_terminal in TERMINAL_APPS:
-                return TERMINAL_APPS[lc_terminal]
-            return lc_terminal
-
-        # Try TERM_PROGRAM from before tmux (iTerm2 sets this)
-        iterm_profile = os.environ.get("ITERM_PROFILE", "")
-        if iterm_profile:
-            return "iTerm2"
-
-        # Try to detect from process tree on macOS
         try:
-            import subprocess
-            # Get parent PIDs up the chain looking for known terminals
             result = subprocess.run(
-                ["ps", "-o", "comm=", "-p", str(os.getppid())],
-                capture_output=True, text=True
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of first process whose frontmost is true'],
+                capture_output=True, text=True, timeout=2
             )
-            parent_comm = result.stdout.strip()
-            if "iTerm" in parent_comm:
-                return "iTerm2"
-            if "Terminal" in parent_comm:
-                return "Terminal"
-            if "Warp" in parent_comm:
-                return "Warp"
+            frontmost = result.stdout.strip()
+            if frontmost:
+                if frontmost in TERMINAL_APPS:
+                    return TERMINAL_APPS[frontmost]
+                # Clean up common suffixes
+                if frontmost.endswith("-gui"):
+                    clean_name = frontmost.replace("-gui", "").title()
+                    return clean_name
+                return frontmost
         except Exception:
             pass
 
-        # If we're in tmux/screen but can't find parent, mention both
+        # Fallback for tmux/screen
         if term_program in ("tmux", "screen"):
             return f"your terminal app (the one running {term_program})"
 
@@ -87,7 +78,6 @@ def get_terminal_app() -> str:
     if "term" in term_program.lower():
         return term_program
 
-    # Fallback: try to get from parent process
     if term_program:
         return term_program
 
