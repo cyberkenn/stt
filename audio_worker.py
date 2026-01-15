@@ -25,6 +25,7 @@ def _log(message: str) -> None:
 
 WAVEFORM_BARS = 24
 WAVEFORM_INTERVAL_S = 0.033  # ~30fps
+PEAK_WINDOW_SIZE = 90  # ~3 seconds rolling window for peak normalization
 
 
 class Recorder:
@@ -37,6 +38,7 @@ class Recorder:
         self._last_waveform_time = 0.0
         self._waveform_buffer = []
         self._peak_level = 0.01  # Auto-normalizing peak (starts low)
+        self._peak_history = []  # Rolling window for percentile-based normalization
 
     def start(self, *, device_name: str | None, sample_rate: int, channels: int) -> None:
         if self._recording:
@@ -60,6 +62,7 @@ class Recorder:
         self._last_waveform_time = time.time()
         self._waveform_buffer = []
         self._peak_level = 0.01  # Reset peak for new recording
+        self._peak_history = []  # Reset rolling window
 
         def callback(indata, frames, time_info, status):
             if status:
@@ -124,16 +127,16 @@ class Recorder:
             else:
                 raw_values.append(0.0)
 
-        # Auto-normalize: track peak and scale to it
+        # Auto-normalize using rolling window percentile (ignores transient spikes)
         current_max = max(raw_values) if raw_values else 0
-        if current_max > self._peak_level:
-            # Quick attack: immediately raise peak
-            self._peak_level = current_max
-        else:
-            # Slow decay: gradually lower peak for consistent visualization
-            self._peak_level = self._peak_level * 0.995 + current_max * 0.005
-            # Don't let it drop too low
-            self._peak_level = max(self._peak_level, 0.005)
+        self._peak_history.append(current_max)
+        if len(self._peak_history) > PEAK_WINDOW_SIZE:
+            self._peak_history.pop(0)
+
+        # Use 85th percentile with EMA smoothing for stable normalization
+        target_peak = float(np.percentile(self._peak_history, 85))
+        target_peak = max(target_peak, 0.005)  # floor to prevent /0
+        self._peak_level = self._peak_level * 0.8 + target_peak * 0.2  # smooth transitions
 
         # Normalize values to 0-1 range based on peak
         values = [min(1.0, v / self._peak_level * 0.85) for v in raw_values]
