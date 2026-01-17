@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -85,6 +86,8 @@ class GroqProvider(TranscriptionProvider):
 
 
 class _MLXWorkerClient:
+    _STARTED_TIMEOUT_S = 2
+    _HEARTBEAT_TIMEOUT_S = 2.5
     def __init__(self, model: str):
         self.model = model
         self._proc: subprocess.Popen[str] | None = None
@@ -219,19 +222,65 @@ class _MLXWorkerClient:
             )
             self._proc.stdin.flush()
 
-            message = self._wait_for(
-                lambda m: m.get("type") == "result" and m.get("id") == req_id,
-                timeout_s=timeout_s,
-            )
+            started_deadline = time.time() + self._STARTED_TIMEOUT_S
+            last_heartbeat = time.time()
 
-            if not message:
-                raise TimeoutError("Timed out waiting for MLX worker response")
+            while True:
+                remaining = started_deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError("MLX worker did not start request in time")
+                try:
+                    message = self._messages.get(timeout=remaining)
+                except queue.Empty:
+                    raise TimeoutError("MLX worker did not start request in time")
 
-            error = message.get("error")
-            if error:
-                raise RuntimeError(str(error))
+                if message.get("type") == "eof":
+                    raise RuntimeError("MLX worker exited unexpectedly")
 
-            return str(message.get("text") or "").strip()
+                if message.get("id") != req_id:
+                    continue
+
+                msg_type = message.get("type")
+                if msg_type == "started":
+                    last_heartbeat = time.time()
+                    break
+                if msg_type == "result":
+                    error = message.get("error")
+                    if error:
+                        raise RuntimeError(str(error))
+                    return str(message.get("text") or "").strip()
+
+            deadline = time.time() + timeout_s if timeout_s > 0 else None
+            while True:
+                if deadline is not None and time.time() >= deadline:
+                    raise TimeoutError("Timed out waiting for MLX worker response")
+
+                heartbeat_deadline = last_heartbeat + self._HEARTBEAT_TIMEOUT_S
+                wait_for = heartbeat_deadline - time.time()
+                if deadline is not None:
+                    wait_for = min(wait_for, deadline - time.time())
+                if wait_for <= 0:
+                    raise TimeoutError("MLX worker heartbeat stalled")
+
+                try:
+                    message = self._messages.get(timeout=wait_for)
+                except queue.Empty:
+                    raise TimeoutError("MLX worker heartbeat stalled")
+
+                if message.get("type") == "eof":
+                    raise RuntimeError("MLX worker exited unexpectedly")
+                if message.get("id") != req_id:
+                    continue
+
+                msg_type = message.get("type")
+                if msg_type == "heartbeat":
+                    last_heartbeat = time.time()
+                    continue
+                if msg_type == "result":
+                    error = message.get("error")
+                    if error:
+                        raise RuntimeError(str(error))
+                    return str(message.get("text") or "").strip()
 
     def _read_stdout(self, proc: subprocess.Popen[str], messages: "queue.Queue[dict[str, Any]]") -> None:
         assert proc.stdout is not None
@@ -433,7 +482,7 @@ class MLXWhisperProvider(TranscriptionProvider):
 
     DEFAULT_MODEL = "mlx-community/whisper-large-v3-mlx"
     _WORKER_STARTUP_TIMEOUT_S = 1800
-    _TRANSCRIBE_TIMEOUT_S = 180
+    _TRANSCRIBE_TIMEOUT_S = 6
 
     def __init__(self, model: str = None):
         self.model = model or os.environ.get("WHISPER_MODEL", self.DEFAULT_MODEL)
@@ -445,12 +494,21 @@ class MLXWhisperProvider(TranscriptionProvider):
         self._use_worker = True
         self._worker: _MLXWorkerClient | None = None
         self._worker_startup_timeout_s = self._WORKER_STARTUP_TIMEOUT_S
-        self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
+        env_timeout = os.environ.get("WHISPER_TIMEOUT_S")
+        if env_timeout:
+            try:
+                self._transcribe_timeout_s = max(1, int(env_timeout))
+            except ValueError:
+                self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
+        else:
+            self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
         self._cleanup_registered = False
         self._worker_lock = threading.Lock()
         self._restart_thread: threading.Thread | None = None
         self._ever_started = False
         self._shutting_down = False
+        self._last_error: str | None = None
+        self._last_error_trace: str | None = None
 
         monitor = threading.Thread(target=self._monitor_worker, daemon=True)
         monitor.start()
@@ -496,6 +554,8 @@ class MLXWhisperProvider(TranscriptionProvider):
         if self._use_worker:
             print("Transcribing...")
             try:
+                self._last_error = None
+                self._last_error_trace = None
                 self._ensure_worker()
                 assert self._worker is not None
                 return self._worker.transcribe(
@@ -504,13 +564,17 @@ class MLXWhisperProvider(TranscriptionProvider):
                     prompt=prompt,
                     timeout_s=self._transcribe_timeout_s,
                 )
-            except TimeoutError:
+            except TimeoutError as e:
                 print("❌ MLX transcription timed out. Restarting MLX worker...")
+                self._last_error = f"timeout: {e}"
+                self._last_error_trace = None
                 self._stop_worker(force=True)
                 self._schedule_worker_warmup()
                 return None
             except Exception as e:
                 print(f"❌ MLX Whisper Error: {e}")
+                self._last_error = str(e)
+                self._last_error_trace = traceback.format_exc()
                 self._stop_worker(force=True)
                 self._schedule_worker_warmup()
                 return None
@@ -526,6 +590,8 @@ class MLXWhisperProvider(TranscriptionProvider):
         print("Transcribing...")
 
         try:
+            self._last_error = None
+            self._last_error_trace = None
             result = self._mlx_whisper.transcribe(
                 audio_file_path,
                 path_or_hf_repo=self.model,
@@ -535,6 +601,8 @@ class MLXWhisperProvider(TranscriptionProvider):
             return result["text"].strip()
         except Exception as e:
             print(f"❌ MLX Whisper Error: {e}")
+            self._last_error = str(e)
+            self._last_error_trace = traceback.format_exc()
             return None
 
     def cancel(self) -> None:
@@ -602,13 +670,20 @@ class ParakeetProvider(TranscriptionProvider):
 
     DEFAULT_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
     _WORKER_STARTUP_TIMEOUT_S = 1800
-    _TRANSCRIBE_TIMEOUT_S = 180
+    _TRANSCRIBE_TIMEOUT_S = 6
 
     def __init__(self, model: str = None):
         self.model = model or os.environ.get("PARAKEET_MODEL", self.DEFAULT_MODEL)
         self._worker: _WorkerClient | None = None
         self._worker_startup_timeout_s = self._WORKER_STARTUP_TIMEOUT_S
-        self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
+        env_timeout = os.environ.get("PARAKEET_TIMEOUT_S")
+        if env_timeout:
+            try:
+                self._transcribe_timeout_s = max(1, int(env_timeout))
+            except ValueError:
+                self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
+        else:
+            self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
         self._cleanup_registered = False
         self._worker_lock = threading.Lock()
         self._restart_thread: threading.Thread | None = None

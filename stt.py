@@ -13,9 +13,9 @@ import threading
 import queue
 import time
 import subprocess
+import shutil
 import atexit
 import fcntl
-import concurrent.futures
 from enum import Enum
 from typing import Any, Callable, Optional
 from Quartz import (
@@ -927,25 +927,48 @@ class STTApp:
             except Exception as e:
                 print(f"⚠️  Error cancelling transcription: {e}")
 
-    def transcribe_audio(self, audio_file_path, timeout_s: int = 200):
+    def transcribe_audio(self, audio_file_path, timeout_s: int | None = None):
         """Transcribe audio using the configured provider with timeout protection"""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self.provider.transcribe, audio_file_path, LANGUAGE, PROMPT)
+        if timeout_s is None:
+            env_timeout = os.environ.get("STT_TRANSCRIBE_TIMEOUT_S")
+            if env_timeout:
+                try:
+                    timeout_s = max(1, int(env_timeout))
+                except ValueError:
+                    timeout_s = 7
+            else:
+                timeout_s = 7
+
+        result_queue: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=1)
+
+        def _run_transcribe() -> None:
             try:
-                return future.result(timeout=timeout_s)
-            except concurrent.futures.TimeoutError:
-                print("❌ Transcription timed out at STTApp level")
-                # Try to cancel the provider if it supports cancellation
-                cancel = getattr(self.provider, "cancel", None)
-                if callable(cancel):
-                    try:
-                        cancel()
-                    except Exception:
-                        pass
-                return None
+                result = self.provider.transcribe(audio_file_path, LANGUAGE, PROMPT)
+                result_queue.put(("ok", result))
             except Exception as e:
-                print(f"❌ Transcription error: {e}")
-                return None
+                result_queue.put(("err", e))
+
+        thread = threading.Thread(target=_run_transcribe, daemon=True)
+        thread.start()
+
+        try:
+            status, payload = result_queue.get(timeout=timeout_s)
+        except queue.Empty:
+            print("❌ Transcription timed out at STTApp level")
+            # Try to cancel the provider if it supports cancellation
+            cancel = getattr(self.provider, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:
+                    pass
+            return None
+
+        if status == "err":
+            print(f"❌ Transcription error: {payload}")
+            return None
+
+        return payload  # type: ignore[return-value]
 
     def print_ready_prompt(self):
         """Print the ready prompt with hotkey name"""
@@ -1035,6 +1058,8 @@ class STTApp:
                     self.type_text(text, send_enter=send_enter)
                     print(f"✓ {text}")
                 else:
+                    if self._maybe_capture_mlx_issue(wav_path):
+                        wav_path = None
                     print("No transcription returned")
 
             self.print_ready_prompt()
@@ -1047,13 +1072,57 @@ class STTApp:
                     os.unlink(wav_path)
                 except OSError:
                     pass
+            with self._lock:
+                self._processing = False
+                self._operation_start_time = None
             # Hide overlay and reset state
             self._overlay.set_transcribing(False)
             self._overlay.hide()
             self._set_state(AppState.IDLE)
-            with self._lock:
-                self._processing = False
-                self._operation_start_time = None
+
+    def _maybe_capture_mlx_issue(self, wav_path: str) -> bool:
+        provider = self.provider
+        last_error = getattr(provider, "_last_error", None)
+        last_trace = getattr(provider, "_last_error_trace", None)
+        if not last_error and not last_trace:
+            return False
+
+        base_dir = os.path.join(os.path.dirname(__file__), ".bugs")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        issue_dir = os.path.join(base_dir, timestamp)
+        os.makedirs(issue_dir, exist_ok=True)
+
+        moved_path = os.path.join(issue_dir, os.path.basename(wav_path))
+        moved = False
+        try:
+            shutil.move(wav_path, moved_path)
+            moved = True
+        except Exception:
+            try:
+                shutil.copy2(wav_path, moved_path)
+                moved = True
+            except Exception:
+                moved_path = wav_path
+
+        issue_log_path = os.path.join(issue_dir, "issue.log")
+        metadata = {
+            "timestamp": timestamp,
+            "provider": getattr(provider, "name", None) or type(provider).__name__,
+            "model": getattr(provider, "model", None),
+            "language": LANGUAGE,
+            "prompt": PROMPT,
+            "audio_file": moved_path,
+            "error": last_error,
+            "traceback": last_trace,
+        }
+        try:
+            with open(issue_log_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(metadata, indent=2, ensure_ascii=True))
+        except Exception:
+            pass
+
+        print(f"⚠️  Saved MLX issue to {issue_dir}")
+        return moved
 
 
 def main():
