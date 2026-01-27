@@ -70,8 +70,11 @@ stt
 Settings are stored in `~/.config/stt/.env`. Run `stt --config` to reconfigure, or edit directly:
 
 ```bash
-# Transcription provider: "mlx" (default), "parakeet", or "groq"
+# Transcription provider: "mlx" (default), "whisper-cpp-http", "parakeet", or "groq"
 PROVIDER=mlx
+
+# Local HTTP server URL (default: http://localhost:8080)
+WHISPER_CPP_HTTP_URL=http://localhost:8080
 
 # Required for cloud mode only
 GROQ_API_KEY=gsk_...
@@ -123,6 +126,40 @@ GROQ_API_KEY=gsk_...
 ```
 
 Requires a [Groq API key](https://console.groq.com) (free tier available).
+
+### HTTP Mode (Local Server)
+
+Run a local HTTP server with Whisper transcription. Useful for performance or custom integration.
+
+```bash
+PROVIDER=whisper-cpp-http
+WHISPER_CPP_HTTP_URL=http://localhost:8080
+```
+
+**Start the server:**
+
+```bash
+# Terminal 1: Start the whisper.cpp server
+./whisper-server -m models/ggml-large-v3.bin -f
+
+# Or run in background with a custom port
+./whisper-server -m models/ggml-large-v3.bin -f -t 4 -ngl 32 -p 8080
+```
+
+The server provides a whisper.cpp-compatible endpoint:
+
+```bash
+curl -X POST http://localhost:8080/inference \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@audio.wav" \
+  -F "language=en"
+```
+
+**Benefits:**
+- Fast HTTP API for integrating with other services
+- Reuse whisper.cpp model across multiple applications
+- Hardware accelerated on CPU/NVIDIA
+- Configurable temperature, model, and decoding options
 
 ### Prompt Examples
 

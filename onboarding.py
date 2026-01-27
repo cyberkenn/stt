@@ -96,6 +96,7 @@ WHISPER_MODELS = [
 # Provider options
 PROVIDERS = [
     ("mlx", "Local MLX Whisper", "Apple Silicon, offline"),
+    ("whisper-cpp-http", "Whisper.cpp HTTP", "Local server, fast"),
     ("groq", "Groq Cloud", "Fast, requires API key"),
     ("parakeet", "Local Parakeet", "Apple Silicon, English only"),
 ]

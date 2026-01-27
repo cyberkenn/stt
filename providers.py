@@ -86,6 +86,46 @@ class GroqProvider(TranscriptionProvider):
                 return None
 
 
+class WhisperCPPHTTPProvider(TranscriptionProvider):
+    """Whisper.cpp HTTP provider (local server)"""
+
+    def __init__(self, base_url: str = None):
+        self.base_url = base_url or os.environ.get("WHISPER_CPP_HTTP_URL", "http://localhost:8080")
+
+    @property
+    def name(self) -> str:
+        return "Whisper.cpp HTTP"
+
+    def is_available(self) -> bool:
+        return self.base_url is not None
+
+    def transcribe(self, audio_file_path: str, language: str, prompt: str = None) -> str | None:
+        import requests
+
+        url = f"{self.base_url}/inference"
+
+        with open(audio_file_path, "rb") as audio_file:
+            files = {"file": ("audio.wav", audio_file)}
+            data = {
+            }
+            if prompt:
+                data["prompt"] = prompt
+
+            try:
+                response = requests.post(url, files=files, data=data, timeout=(5, 20))
+                response.raise_for_status()
+                result = response.json()
+                return result.get("text", "").strip() or None
+            except requests.exceptions.RequestException as e:
+                print(f"❌ HTTP Error: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        print(f"Response: {e.response.text}")
+                    except Exception:
+                        pass
+                return None
+
+
 class _MLXWorkerClient:
     _STARTED_TIMEOUT_S = 2
     _HEARTBEAT_TIMEOUT_S = 2.5
@@ -851,6 +891,7 @@ def get_provider(provider_name: str = None) -> TranscriptionProvider:
         "groq": GroqProvider,
         "mlx": MLXWhisperProvider,
         "parakeet": ParakeetProvider,
+        "whisper-cpp-http": WhisperCPPHTTPProvider,
     }
 
     if provider_name not in providers:
