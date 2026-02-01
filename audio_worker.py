@@ -24,7 +24,7 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-WAVEFORM_BARS = 24
+WAVEFORM_BARS = 20
 WAVEFORM_INTERVAL_S = 0.033  # ~30fps
 PEAK_WINDOW_SIZE = 90  # ~3 seconds rolling window for peak normalization
 WAVEFORM_MAX_CHUNKS = 64  # cap to avoid unbounded growth if reader stalls
@@ -43,6 +43,7 @@ class Recorder:
         self._waveform_lock = threading.Lock()
         self._waveform_thread = None
         self._waveform_stop = None
+        self._force_exit = False
 
     def start(self, *, device_name: str | None, sample_rate: int, channels: int) -> None:
         if self._recording:
@@ -197,11 +198,7 @@ class Recorder:
         self._chunks = []
 
         if stream is not None:
-            try:
-                stream.abort(ignore_errors=True)
-                stream.close(ignore_errors=True)
-            except Exception:
-                _log(traceback.format_exc())
+            self._close_stream_async(stream)
 
         if not chunks:
             return 0, 0.0
@@ -227,14 +224,28 @@ class Recorder:
         stream = self._stream
         self._stream = None
         if stream is not None:
+            self._close_stream_async(stream)
+
+    def shutdown(self) -> None:
+        self.cancel()
+
+    def _close_stream_async(self, stream) -> None:
+        def _close():
             try:
                 stream.abort(ignore_errors=True)
                 stream.close(ignore_errors=True)
             except Exception:
                 _log(traceback.format_exc())
 
-    def shutdown(self) -> None:
-        self.cancel()
+        thread = threading.Thread(target=_close, daemon=True)
+        thread.start()
+        thread.join(timeout=0.5)
+        if thread.is_alive():
+            _log("[stt:audio-worker] Stream close stuck; forcing worker restart")
+            self._force_exit = True
+
+    def should_exit(self) -> bool:
+        return self._force_exit
 
 
 def main() -> int:
@@ -268,6 +279,8 @@ def main() -> int:
                     channels=int(message.get("channels") or 1),
                 )
                 _write_json({"type": "started", "id": req_id})
+                if recorder.should_exit():
+                    return 0
                 continue
 
             if msg_type == "stop":
@@ -276,17 +289,23 @@ def main() -> int:
                     raise ValueError("Missing wav_path")
                 frames, peak = recorder.stop(wav_path=str(wav_path))
                 _write_json({"type": "stopped", "id": req_id, "wav_path": wav_path, "frames": frames, "peak": peak})
+                if recorder.should_exit():
+                    return 0
                 continue
 
             if msg_type == "cancel":
                 recorder.cancel()
                 _write_json({"type": "canceled", "id": req_id})
+                if recorder.should_exit():
+                    return 0
                 continue
 
             _log(f"[stt:audio-worker] Unknown message type: {msg_type!r}")
         except Exception as e:
             _log(traceback.format_exc())
             _write_json({"type": "error", "id": req_id, "error": str(e)})
+            if recorder.should_exit():
+                return 0
 
     return 0
 
