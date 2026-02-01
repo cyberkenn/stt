@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import traceback
 from typing import Any
 
@@ -26,6 +27,7 @@ def _log(message: str) -> None:
 WAVEFORM_BARS = 24
 WAVEFORM_INTERVAL_S = 0.033  # ~30fps
 PEAK_WINDOW_SIZE = 90  # ~3 seconds rolling window for peak normalization
+WAVEFORM_MAX_CHUNKS = 64  # cap to avoid unbounded growth if reader stalls
 
 
 class Recorder:
@@ -35,16 +37,17 @@ class Recorder:
         self._chunks = []
         self._sample_rate = None
         self._channels = None
-        self._last_waveform_time = 0.0
         self._waveform_buffer = []
         self._peak_level = 0.01  # Auto-normalizing peak (starts low)
         self._peak_history = []  # Rolling window for percentile-based normalization
+        self._waveform_lock = threading.Lock()
+        self._waveform_thread = None
+        self._waveform_stop = None
 
     def start(self, *, device_name: str | None, sample_rate: int, channels: int) -> None:
         if self._recording:
             raise RuntimeError("Already recording")
 
-        import time
         import numpy as np
         import sounddevice as sd
 
@@ -59,23 +62,20 @@ class Recorder:
         self._sample_rate = sample_rate
         self._channels = channels
         self._recording = True
-        self._last_waveform_time = time.time()
         self._waveform_buffer = []
         self._peak_level = 0.01  # Reset peak for new recording
         self._peak_history = []  # Reset rolling window
+        self._start_waveform_thread()
 
         def callback(indata, frames, time_info, status):
             if status:
                 _log(f"[stt:audio-worker] Status: {status}")
             if self._recording:
                 self._chunks.append(indata.copy())
-                self._waveform_buffer.append(indata.copy())
-
-                # Send waveform at interval
-                now = time.time()
-                if now - self._last_waveform_time >= WAVEFORM_INTERVAL_S:
-                    self._last_waveform_time = now
-                    self._send_waveform(np)
+                with self._waveform_lock:
+                    self._waveform_buffer.append(indata.copy())
+                    if len(self._waveform_buffer) > WAVEFORM_MAX_CHUNKS:
+                        self._waveform_buffer = self._waveform_buffer[-WAVEFORM_MAX_CHUNKS // 2:]
 
         stream = sd.InputStream(
             device=device_index,
@@ -94,14 +94,54 @@ class Recorder:
                 return i
         return None
 
-    def _send_waveform(self, np) -> None:
+    def _start_waveform_thread(self) -> None:
+        if self._waveform_thread and self._waveform_thread.is_alive():
+            return
+        self._waveform_stop = threading.Event()
+        self._waveform_thread = threading.Thread(target=self._waveform_loop, daemon=True)
+        self._waveform_thread.start()
+
+    def _stop_waveform_thread(self) -> None:
+        if self._waveform_stop:
+            self._waveform_stop.set()
+        if self._waveform_thread:
+            self._waveform_thread.join(timeout=0.5)
+            if self._waveform_thread.is_alive():
+                return
+        self._waveform_thread = None
+        self._waveform_stop = None
+
+    def _waveform_loop(self) -> None:
+        import time
+        import numpy as np
+
+        next_tick = time.time()
+        while self._waveform_stop and not self._waveform_stop.is_set():
+            now = time.time()
+            delay = next_tick - now
+            if delay > 0:
+                self._waveform_stop.wait(timeout=delay)
+                continue
+            next_tick = now + WAVEFORM_INTERVAL_S
+
+            with self._waveform_lock:
+                if not self._waveform_buffer:
+                    continue
+                buffers = self._waveform_buffer
+                self._waveform_buffer = []
+
+            try:
+                self._send_waveform(np, buffers)
+            except Exception:
+                _log(traceback.format_exc())
+
+    def _send_waveform(self, np, buffers) -> None:
         """Calculate and send waveform data with auto-normalization"""
-        if not self._waveform_buffer:
+        if not buffers:
             return
 
         # Concatenate recent audio
-        audio = np.concatenate(self._waveform_buffer, axis=0)
-        self._waveform_buffer = []
+        audio = np.concatenate(buffers, axis=0)
 
         # Take absolute values and flatten to mono
         if audio.ndim > 1:
@@ -148,6 +188,9 @@ class Recorder:
             return 0, 0.0
 
         self._recording = False
+        self._stop_waveform_thread()
+        with self._waveform_lock:
+            self._waveform_buffer = []
         stream = self._stream
         self._stream = None
         chunks = self._chunks
@@ -177,6 +220,9 @@ class Recorder:
     def cancel(self) -> None:
         self._recording = False
         self._chunks = []
+        self._stop_waveform_thread()
+        with self._waveform_lock:
+            self._waveform_buffer = []
 
         stream = self._stream
         self._stream = None
@@ -247,4 +293,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

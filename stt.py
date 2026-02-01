@@ -20,13 +20,24 @@ import select
 from collections import deque
 from enum import Enum
 from typing import Any, Callable, Optional
-from Quartz import (
-    CGEventCreateKeyboardEvent,
-    CGEventPost,
-    CGEventSetFlags,
-    kCGHIDEventTap,
-    kCGEventFlagMaskCommand,
-)
+HEADLESS = os.environ.get("STT_HEADLESS") == "1"
+
+
+class _HeadlessOverlay:
+    def show(self):
+        pass
+
+    def hide(self):
+        pass
+
+    def update_waveform(self, values, above_threshold=False):
+        pass
+
+    def set_transcribing(self, transcribing: bool):
+        pass
+
+    def set_shift_held(self, held: bool):
+        pass
 
 # Suppress multiprocessing semaphore leak warning (benign at exit)
 import warnings
@@ -57,17 +68,86 @@ try:
     RELEASES_URL = "https://api.github.com/repos/bokan/stt/releases/latest"
 
     from dotenv import load_dotenv
-    import sounddevice as sd
-    from pynput import keyboard, mouse
+    if not HEADLESS:
+        import sounddevice as sd
+        from pynput import keyboard, mouse
+    else:
+        sd = None
+
+        class _DummyKeyboard:
+            class Key:
+                cmd = "cmd"
+                cmd_l = "cmd_l"
+                cmd_r = "cmd_r"
+                alt_l = "alt_l"
+                alt_r = "alt_r"
+                ctrl_l = "ctrl_l"
+                ctrl_r = "ctrl_r"
+                shift_l = "shift_l"
+                shift_r = "shift_r"
+                esc = "esc"
+
+        class _DummyMouse:
+            class Button:
+                middle = "middle"
+
+        keyboard = _DummyKeyboard
+        mouse = _DummyMouse
     import requests
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
 
     from providers import get_provider
-    from menubar import STTMenuBar
-    from overlay import get_overlay
-    from prompt_overlay import PromptOverlay
-    from prompts_config import ensure_default_prompts
+    if not HEADLESS:
+        from Quartz import (
+            CGEventCreateKeyboardEvent,
+            CGEventPost,
+            CGEventSetFlags,
+            kCGHIDEventTap,
+            kCGEventFlagMaskCommand,
+        )
+        from menubar import STTMenuBar
+        from overlay import get_overlay
+        from prompt_overlay import PromptOverlay
+        from prompts_config import ensure_default_prompts
+    else:
+        CGEventCreateKeyboardEvent = None
+        CGEventPost = None
+        CGEventSetFlags = None
+        kCGHIDEventTap = None
+        kCGEventFlagMaskCommand = None
+
+        def get_overlay():
+            return _HeadlessOverlay()
+
+        def ensure_default_prompts():
+            return None
+
+        class PromptOverlay:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def show(self):
+                pass
+
+            def hide(self):
+                pass
+
+            def handle_key(self, *_):
+                return False
+
+        class STTMenuBar:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def update_sound_enabled(self, *_):
+                pass
+
+            def update_provider_name(self, *_):
+                pass
+
+            def run(self):
+                raise RuntimeError("STT_HEADLESS is set; UI disabled")
 finally:
     _slow_timer.cancel()
     _status.stop()
@@ -1317,6 +1397,10 @@ class STTApp:
 def main():
     global GROQ_API_KEY, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER, AUDIO_DEVICE
 
+    if HEADLESS:
+        print("STT_HEADLESS=1 set; UI disabled")
+        sys.exit(1)
+
     # Check for --config flag
     if "--config" in sys.argv:
         setup_wizard()
@@ -1520,45 +1604,56 @@ def main():
     prompt_overlay = PromptOverlay(on_select=on_prompt_select)
 
     key_pressed = False
+    mouse_pressed = False
     shift_held = False
     send_enter_flag = False
     prompt_overlay_active = False
     trigger_key = HOTKEYS[HOTKEY]["key"] if HOTKEY in HOTKEYS else keyboard.Key.cmd_r
+    trigger_is_shift = trigger_key in (keyboard.Key.shift_l, keyboard.Key.shift_r)
+    trigger_is_alt = trigger_key in (keyboard.Key.alt_l, keyboard.Key.alt_r)
 
     def on_press(key):
-        nonlocal key_pressed, shift_held, send_enter_flag, prompt_overlay_active
+        nonlocal key_pressed, mouse_pressed, shift_held, send_enter_flag, prompt_overlay_active
         try:
-            if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
+            if key == trigger_key:
+                if key_pressed and not app.recording and not app._starting:
+                    key_pressed = False
+                    send_enter_flag = False
+                if not key_pressed:
+                    key_pressed = True
+                    # Check if shift is already held when starting (unless shift is the trigger)
+                    send_enter_flag = shift_held and not trigger_is_shift
+                    if send_enter_flag:
+                        app._overlay.set_shift_held(True)
+                    # Start recording in background thread to avoid blocking keyboard listener
+                    threading.Thread(target=app.start_recording, daemon=True).start()
+                return
+            if key in (keyboard.Key.shift_l, keyboard.Key.shift_r) and not trigger_is_shift:
                 shift_held = True
                 # If already recording, mark for enter and show indicator (stays visible)
                 if app.recording and not send_enter_flag:
                     send_enter_flag = True
                     app._overlay.set_shift_held(True)
-            elif key == trigger_key:
-                if not key_pressed:
-                    key_pressed = True
-                    # Check if shift is already held when starting
-                    send_enter_flag = shift_held
-                    if shift_held:
-                        app._overlay.set_shift_held(True)
-                    # Start recording in background thread to avoid blocking keyboard listener
-                    threading.Thread(target=app.start_recording, daemon=True).start()
-            elif key == keyboard.Key.esc:
+                return
+            if key == keyboard.Key.esc:
                 if prompt_overlay_active:
                     prompt_overlay.hide()
                     prompt_overlay_active = False
                 elif app.recording:
                     key_pressed = False
+                    mouse_pressed = False
                     send_enter_flag = False
                     # Cancel recording in background thread to avoid blocking keyboard listener
                     threading.Thread(target=app.cancel_recording, daemon=True).start()
                 else:
                     threading.Thread(target=app.cancel_transcription, daemon=True).start()
-            elif key == keyboard.Key.alt_r:
+                return
+            if key == keyboard.Key.alt_r and not trigger_is_alt:
                 if not prompt_overlay_active:
                     prompt_overlay_active = True
                     prompt_overlay.show()
-            elif prompt_overlay_active and hasattr(key, 'vk') and key.vk is not None:
+                return
+            if prompt_overlay_active and hasattr(key, 'vk') and key.vk is not None:
                 # Map virtual key codes to chars (Option+key produces special chars)
                 VK_TO_CHAR = {
                     18: '1', 19: '2', 20: '3', 21: '4', 23: '5',
@@ -1576,20 +1671,23 @@ def main():
             print(f"⚠️  Error in key press handler: {e}")
             # Reset state on error to prevent stuck keys
             key_pressed = False
+            mouse_pressed = False
             send_enter_flag = False
 
     def on_release(key):
-        nonlocal key_pressed, shift_held, send_enter_flag, prompt_overlay_active
+        nonlocal key_pressed, mouse_pressed, shift_held, send_enter_flag, prompt_overlay_active
         try:
             if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
                 shift_held = False
                 # Don't hide enter icon - it stays visible once activated
-                return
+                if not trigger_is_shift:
+                    return
             if key == keyboard.Key.alt_r:
                 if prompt_overlay_active:
                     prompt_overlay.hide()
                     prompt_overlay_active = False
-                return
+                if not trigger_is_alt:
+                    return
             # Check for trigger key release. Also accept generic 'cmd' when trigger is cmd_r,
             # because macOS reports ambiguous releases (e.g., releasing cmd_r while cmd_l is held)
             # as generic 'cmd' which doesn't match cmd_r specifically.
@@ -1606,20 +1704,21 @@ def main():
             print(f"⚠️  Error in key release handler: {e}")
             # Reset state on error to prevent stuck keys
             key_pressed = False
+            mouse_pressed = False
             send_enter_flag = False
 
     def on_click(x, y, button, pressed):
-        nonlocal key_pressed, send_enter_flag
+        nonlocal mouse_pressed
         if button == mouse.Button.middle:
             if pressed:
-                if not key_pressed:
-                    key_pressed = True
-                    send_enter_flag = True  # Middle button always sends Enter
+                if mouse_pressed and not app.recording and not app._starting:
+                    mouse_pressed = False
+                if not mouse_pressed:
+                    mouse_pressed = True
                     threading.Thread(target=app.start_recording, daemon=True).start()
             else:
-                if key_pressed:
-                    key_pressed = False
-                    send_enter_flag = False
+                if mouse_pressed:
+                    mouse_pressed = False
                     threading.Thread(target=app.process_recording, args=(True,), daemon=True).start()
 
     # Start the keyboard listener in a background thread
@@ -1633,7 +1732,7 @@ def main():
     # Config change handler
     def on_config_change(changes: dict):
         global GROQ_API_KEY, AUDIO_DEVICE, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER
-        nonlocal trigger_key
+        nonlocal trigger_key, trigger_is_shift, trigger_is_alt
 
         # Update global variables
         if "GROQ_API_KEY" in changes:
@@ -1651,6 +1750,8 @@ def main():
             if new_hotkey in HOTKEYS:
                 HOTKEY = new_hotkey
                 trigger_key = HOTKEYS[HOTKEY]["key"]
+                trigger_is_shift = trigger_key in (keyboard.Key.shift_l, keyboard.Key.shift_r)
+                trigger_is_alt = trigger_key in (keyboard.Key.alt_l, keyboard.Key.alt_r)
                 print(f"   Hotkey: {HOTKEYS[HOTKEY]['name']}")
             else:
                 print(f"   Invalid hotkey: {new_hotkey}, keeping current")
