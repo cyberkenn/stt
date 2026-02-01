@@ -37,6 +37,7 @@ WAVEFORM_BARS = 20
 WAVEFORM_INTERVAL_S = 0.033  # ~30fps
 PEAK_WINDOW_SIZE = 90  # ~3 seconds rolling window for peak normalization
 WAVEFORM_MAX_CHUNKS = 64  # cap to avoid unbounded growth if reader stalls
+START_TIMEOUT_S = 2.0
 
 
 class Recorder:
@@ -75,7 +76,6 @@ class Recorder:
         self._waveform_buffer = []
         self._peak_level = 0.01  # Reset peak for new recording
         self._peak_history = []  # Reset rolling window
-        self._start_waveform_thread()
 
         def callback(indata, frames, time_info, status):
             if status:
@@ -87,15 +87,41 @@ class Recorder:
                     if len(self._waveform_buffer) > WAVEFORM_MAX_CHUNKS:
                         self._waveform_buffer = self._waveform_buffer[-WAVEFORM_MAX_CHUNKS // 2:]
 
-        stream = sd.InputStream(
-            device=device_index,
-            samplerate=sample_rate,
-            channels=channels,
-            dtype=np.float32,
-            callback=callback,
-        )
-        stream.start()
+        start_state = {"stream": None, "error": None}
+
+        def _do_start():
+            try:
+                stream = sd.InputStream(
+                    device=device_index,
+                    samplerate=sample_rate,
+                    channels=channels,
+                    dtype=np.float32,
+                    callback=callback,
+                )
+                stream.start()
+                start_state["stream"] = stream
+            except Exception as e:
+                start_state["error"] = e
+
+        thread = threading.Thread(target=_do_start, daemon=True)
+        thread.start()
+        thread.join(timeout=START_TIMEOUT_S)
+        if thread.is_alive():
+            self._recording = False
+            self._force_exit = True
+            raise TimeoutError("Timed out starting audio stream")
+
+        if start_state["error"] is not None:
+            self._recording = False
+            raise start_state["error"]
+
+        stream = start_state["stream"]
+        if stream is None:
+            self._recording = False
+            raise RuntimeError("Audio stream failed to start")
+
         self._stream = stream
+        self._start_waveform_thread()
 
     def _resolve_device(self, name: str, sd) -> int | None:
         """Resolve device name to current index."""
