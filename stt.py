@@ -103,8 +103,13 @@ try:
             CGEventCreateKeyboardEvent,
             CGEventPost,
             CGEventSetFlags,
+            CGEventSourceFlagsState,
             kCGHIDEventTap,
+            kCGEventSourceStateHIDSystemState,
             kCGEventFlagMaskCommand,
+            kCGEventFlagMaskShift,
+            kCGEventFlagMaskAlternate,
+            kCGEventFlagMaskControl,
         )
         from menubar import STTMenuBar
         from overlay import get_overlay
@@ -114,8 +119,13 @@ try:
         CGEventCreateKeyboardEvent = None
         CGEventPost = None
         CGEventSetFlags = None
+        CGEventSourceFlagsState = None
         kCGHIDEventTap = None
+        kCGEventSourceStateHIDSystemState = None
         kCGEventFlagMaskCommand = None
+        kCGEventFlagMaskShift = None
+        kCGEventFlagMaskAlternate = None
+        kCGEventFlagMaskControl = None
 
         def get_overlay():
             return _HeadlessOverlay()
@@ -912,6 +922,7 @@ class STTApp:
     _MAX_OPERATION_TIME_S = 300  # 5 minutes
     _MAX_STARTING_TIME_S = 5
     _MAX_PROCESSING_TIME_S = 20
+    _MAX_WAVEFORM_STALL_S = 2.5
 
     def __init__(self, device_name=None, provider=None):
         self.recording = False
@@ -930,6 +941,7 @@ class STTApp:
         self._operation_start_time: Optional[float] = None  # Track when operations start
         self._starting_since: Optional[float] = None
         self._processing_since: Optional[float] = None
+        self._last_waveform_ts: Optional[float] = None
         self._event_log = deque(maxlen=200)
 
         # State management for menu bar
@@ -943,6 +955,7 @@ class STTApp:
 
     def _on_waveform(self, values: list[float], raw_peak: float):
         """Handle waveform data from audio worker"""
+        self._last_waveform_ts = time.time()
         above_threshold = raw_peak >= SILENCE_THRESHOLD
         self._overlay.update_waveform(values, above_threshold)
 
@@ -965,6 +978,11 @@ class STTApp:
                     if elapsed > self._MAX_PROCESSING_TIME_S:
                         print(f"⚠️  Processing stuck for {elapsed:.1f}s, resetting state...")
                         self._force_reset_state_locked()
+                if self.recording and not self._starting and not self._processing and self._last_waveform_ts is not None:
+                    stall = time.time() - self._last_waveform_ts
+                    if stall > self._MAX_WAVEFORM_STALL_S:
+                        print(f"⚠️  Audio waveform stalled for {stall:.1f}s, resetting state...")
+                        self._force_reset_state_locked()
 
     def _force_reset_state_locked(self):
         """Force reset all state flags (must be called with lock held)"""
@@ -974,6 +992,7 @@ class STTApp:
         self._operation_start_time = None
         self._starting_since = None
         self._processing_since = None
+        self._last_waveform_ts = None
         self._log_event("force_reset")
         # Hide overlay
         try:
@@ -1038,6 +1057,7 @@ class STTApp:
             self.recording = True
             self._operation_start_time = time.time()
             self._starting_since = self._operation_start_time
+            self._last_waveform_ts = None
             self._log_event("start_recording")
 
         self._set_state(AppState.RECORDING)
@@ -1606,15 +1626,25 @@ def main():
 
     key_pressed = False
     mouse_pressed = False
+    record_source = None
     shift_held = False
     send_enter_flag = False
     prompt_overlay_active = False
     trigger_key = HOTKEYS[HOTKEY]["key"] if HOTKEY in HOTKEYS else keyboard.Key.cmd_r
     trigger_is_shift = trigger_key in (keyboard.Key.shift_l, keyboard.Key.shift_r)
     trigger_is_alt = trigger_key in (keyboard.Key.alt_l, keyboard.Key.alt_r)
+    trigger_flag_mask = None
+    if trigger_key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):
+        trigger_flag_mask = kCGEventFlagMaskCommand
+    elif trigger_key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
+        trigger_flag_mask = kCGEventFlagMaskShift
+    elif trigger_key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
+        trigger_flag_mask = kCGEventFlagMaskAlternate
+    elif trigger_key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+        trigger_flag_mask = kCGEventFlagMaskControl
 
     def on_press(key):
-        nonlocal key_pressed, mouse_pressed, shift_held, send_enter_flag, prompt_overlay_active
+        nonlocal key_pressed, mouse_pressed, record_source, shift_held, send_enter_flag, prompt_overlay_active
         try:
             if key == trigger_key:
                 if key_pressed and not app.recording and not app._starting:
@@ -1622,6 +1652,7 @@ def main():
                     send_enter_flag = False
                 if not key_pressed:
                     key_pressed = True
+                    record_source = "keyboard"
                     # Check if shift is already held when starting (unless shift is the trigger)
                     send_enter_flag = shift_held and not trigger_is_shift
                     if send_enter_flag:
@@ -1644,6 +1675,7 @@ def main():
                     key_pressed = False
                     mouse_pressed = False
                     send_enter_flag = False
+                    record_source = None
                     # Cancel recording in background thread to avoid blocking keyboard listener
                     threading.Thread(target=app.cancel_recording, daemon=True).start()
                 else:
@@ -1674,9 +1706,10 @@ def main():
             key_pressed = False
             mouse_pressed = False
             send_enter_flag = False
+            record_source = None
 
     def on_release(key):
-        nonlocal key_pressed, mouse_pressed, shift_held, send_enter_flag, prompt_overlay_active
+        nonlocal key_pressed, mouse_pressed, record_source, shift_held, send_enter_flag, prompt_overlay_active
         try:
             if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
                 shift_held = False
@@ -1699,6 +1732,7 @@ def main():
                     key_pressed = False
                     send_enter = send_enter_flag
                     send_enter_flag = False
+                    record_source = None
                     # Process in a separate thread to not block the listener
                     threading.Thread(target=app.process_recording, args=(send_enter,)).start()
         except Exception as e:
@@ -1707,19 +1741,22 @@ def main():
             key_pressed = False
             mouse_pressed = False
             send_enter_flag = False
+            record_source = None
 
     def on_click(x, y, button, pressed):
-        nonlocal mouse_pressed
+        nonlocal mouse_pressed, record_source
         if button == mouse.Button.middle:
             if pressed:
                 if mouse_pressed and not app.recording and not app._starting:
                     mouse_pressed = False
                 if not mouse_pressed:
                     mouse_pressed = True
+                    record_source = "mouse"
                     threading.Thread(target=app.start_recording, daemon=True).start()
             else:
                 if mouse_pressed:
                     mouse_pressed = False
+                    record_source = None
                     threading.Thread(target=app.process_recording, args=(True,), daemon=True).start()
 
     # Start the keyboard listener in a background thread
@@ -1730,10 +1767,36 @@ def main():
     mouse_listener = mouse.Listener(on_click=on_click)
     mouse_listener.start()
 
+    # Fallback: if release event is missed, detect modifier state and stop recording
+    if not HEADLESS and CGEventSourceFlagsState and trigger_flag_mask is not None:
+        def _key_release_fallback():
+            nonlocal key_pressed, record_source, send_enter_flag
+            last_forced = 0.0
+            while True:
+                time.sleep(0.2)
+                if not app.recording or app._starting or app._processing:
+                    continue
+                if record_source != "keyboard":
+                    continue
+                flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
+                if flags & trigger_flag_mask:
+                    continue
+                now = time.time()
+                if now - last_forced < 1.0:
+                    continue
+                last_forced = now
+                send_enter = send_enter_flag
+                send_enter_flag = False
+                key_pressed = False
+                record_source = None
+                threading.Thread(target=app.process_recording, args=(send_enter,), daemon=True).start()
+
+        threading.Thread(target=_key_release_fallback, daemon=True).start()
+
     # Config change handler
     def on_config_change(changes: dict):
         global GROQ_API_KEY, AUDIO_DEVICE, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER
-        nonlocal trigger_key, trigger_is_shift, trigger_is_alt
+        nonlocal trigger_key, trigger_is_shift, trigger_is_alt, trigger_flag_mask
 
         # Update global variables
         if "GROQ_API_KEY" in changes:
@@ -1753,6 +1816,16 @@ def main():
                 trigger_key = HOTKEYS[HOTKEY]["key"]
                 trigger_is_shift = trigger_key in (keyboard.Key.shift_l, keyboard.Key.shift_r)
                 trigger_is_alt = trigger_key in (keyboard.Key.alt_l, keyboard.Key.alt_r)
+                if trigger_key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):
+                    trigger_flag_mask = kCGEventFlagMaskCommand
+                elif trigger_key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
+                    trigger_flag_mask = kCGEventFlagMaskShift
+                elif trigger_key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
+                    trigger_flag_mask = kCGEventFlagMaskAlternate
+                elif trigger_key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+                    trigger_flag_mask = kCGEventFlagMaskControl
+                else:
+                    trigger_flag_mask = None
                 print(f"   Hotkey: {HOTKEYS[HOTKEY]['name']}")
             else:
                 print(f"   Invalid hotkey: {new_hotkey}, keeping current")
