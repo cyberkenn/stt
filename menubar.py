@@ -80,11 +80,11 @@ class STTMenuBar(rumps.App):
     def _build_menu(self):
         """Build the menu items"""
         # Info items (disabled)
-        hotkey_item = rumps.MenuItem(f"Hotkey: {self.hotkey_name}")
-        hotkey_item.set_callback(None)
+        self._hotkey_item = rumps.MenuItem(f"Hotkey: {self.hotkey_name}")
+        self._hotkey_item.set_callback(None)
 
-        provider_item = rumps.MenuItem(f"Provider: {self.provider_name}")
-        provider_item.set_callback(None)
+        self._provider_item = rumps.MenuItem(f"Provider: {self.provider_name}")
+        self._provider_item.set_callback(None)
 
         # Toggle sound item
         self._sound_item = rumps.MenuItem("Sound", callback=self._toggle_sound)
@@ -97,8 +97,8 @@ class STTMenuBar(rumps.App):
         quit_item = rumps.MenuItem("Quit", callback=self._quit_app)
 
         self.menu = [
-            hotkey_item,
-            provider_item,
+            self._hotkey_item,
+            self._provider_item,
             None,  # Separator
             self._sound_item,
             config_item,
@@ -163,9 +163,18 @@ class STTMenuBar(rumps.App):
     def update_provider_name(self, name: str):
         """Update provider name in menu (called from config reload)"""
         self.provider_name = name
-        # Update the menu item title
-        if len(self.menu) > 1:
-            self.menu.values()[1].title = f"Provider: {name}"
+        try:
+            self._provider_item.title = f"Provider: {name}"
+        except Exception:
+            pass
+
+    def update_hotkey_name(self, name: str):
+        """Update hotkey name in menu (called from config reload)"""
+        self.hotkey_name = name
+        try:
+            self._hotkey_item.title = f"Hotkey: {name}"
+        except Exception:
+            pass
 
     def _open_config(self, _):
         """Open the config file in default editor"""

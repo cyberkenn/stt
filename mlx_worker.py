@@ -14,8 +14,6 @@ import os
 import sys
 import traceback
 from typing import Any
-import threading
-import time
 
 
 def _write_json(message: dict[str, Any]) -> None:
@@ -76,30 +74,15 @@ def main() -> int:
         prompt = message.get("prompt") or None
 
         try:
-            _write_json({"type": "started", "id": req_id})
-            stop_heartbeat = threading.Event()
-
-            def _heartbeat() -> None:
-                while not stop_heartbeat.is_set():
-                    _write_json({"type": "heartbeat", "id": req_id, "ts": time.time()})
-                    stop_heartbeat.wait(0.5)
-
-            heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
-            heartbeat_thread.start()
             result = mlx_whisper.transcribe(
                 audio_file_path,
                 path_or_hf_repo=model,
                 language=language,
                 initial_prompt=prompt,
             )
-            stop_heartbeat.set()
             text = (result.get("text") or "").strip()
             _write_json({"type": "result", "id": req_id, "text": text, "error": None})
         except Exception as e:
-            try:
-                stop_heartbeat.set()
-            except Exception:
-                pass
             _log(traceback.format_exc())
             _write_json({"type": "result", "id": req_id, "text": "", "error": str(e)})
 

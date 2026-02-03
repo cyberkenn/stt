@@ -1,14 +1,18 @@
 """Prompt configuration for STT.
 
-Loads custom prompts from ~/go/src/github.com/bokan/dotfiles/stt-prompts/*.md files.
+Loads custom prompts from ~/.config/stt/prompts/*.md files.
 Falls back to built-in defaults if directory empty/missing.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import shutil
 
-PROMPTS_DIR = Path.home() / "go" / "src" / "github.com" / "bokan" / "dotfiles" / "stt-prompts"
+PROMPTS_DIR = Path.home() / ".config" / "stt" / "prompts"
+OLD_PROMPTS_DIR = Path.home() / "go" / "src" / "github.com" / "bokan" / "dotfiles" / "stt-prompts"
+
+DEFAULT_ICON = "•"
 
 
 @dataclass
@@ -16,7 +20,7 @@ class PromptItem:
     key: str
     label: str
     text: str
-    icon: str | None = None
+    icon: str = DEFAULT_ICON
     enter: bool = False
 
 
@@ -60,9 +64,32 @@ def _default_prompts() -> list[PromptItem]:
         PromptItem(key="5", icon="📖", label="Document", text="Add documentation comments to:\n\n"),
     ]
 
+def _migrate_prompts_if_needed() -> None:
+    """One-time copy from old dotfiles path if new prompts dir is empty."""
+    try:
+        if PROMPTS_DIR.exists():
+            existing = list(PROMPTS_DIR.glob("*.md"))
+            if existing:
+                return
+        if not OLD_PROMPTS_DIR.exists():
+            return
+        old_files = list(OLD_PROMPTS_DIR.glob("*.md"))
+        if not old_files:
+            return
+        PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+        for src in old_files:
+            dst = PROMPTS_DIR / src.name
+            if dst.exists():
+                continue
+            shutil.copy2(src, dst)
+    except Exception:
+        # Migration is best-effort; fall back to defaults.
+        return
+
 
 def ensure_default_prompts() -> None:
     """Create prompts dir and default .md files if dir empty/missing."""
+    _migrate_prompts_if_needed()
     PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Check if dir has any .md files
@@ -91,6 +118,7 @@ def load_prompts() -> list[PromptItem]:
     Returns list of PromptItem sorted by key.
     Falls back to defaults if dir missing/empty.
     """
+    _migrate_prompts_if_needed()
     if not PROMPTS_DIR.exists():
         return _default_prompts()
 
@@ -109,8 +137,10 @@ def load_prompts() -> list[PromptItem]:
         # Label defaults to filename
         label = metadata.get("label", filepath.stem.replace("_", " ").title())
 
-        # Icon optional
-        icon = metadata.get("icon")
+        # Icon optional; normalize to non-empty string.
+        icon = (metadata.get("icon") or "").strip()
+        if not icon or icon.lower() == "none":
+            icon = DEFAULT_ICON
 
         # Enter flag - triggers on enter key
         enter = metadata.get("enter", "").lower() == "true"
@@ -118,7 +148,7 @@ def load_prompts() -> list[PromptItem]:
         prompts.append(PromptItem(
             key=str(key),
             label=label,
-            text=body,
+            text=body or "",
             icon=icon,
             enter=enter,
         ))

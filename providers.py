@@ -127,8 +127,6 @@ class WhisperCPPHTTPProvider(TranscriptionProvider):
 
 
 class _MLXWorkerClient:
-    _STARTED_TIMEOUT_S = 2
-    _HEARTBEAT_TIMEOUT_S = 2.5
     _WRITE_TIMEOUT_S = 2.0
     _WRITE_LOCK_TIMEOUT_S = 2.0
 
@@ -267,65 +265,18 @@ class _MLXWorkerClient:
             finally:
                 self._write_lock.release()
 
-            started_deadline = time.time() + self._STARTED_TIMEOUT_S
-            last_heartbeat = time.time()
-
-            while True:
-                remaining = started_deadline - time.time()
-                if remaining <= 0:
-                    raise TimeoutError("MLX worker did not start request in time")
-                try:
-                    message = self._messages.get(timeout=remaining)
-                except queue.Empty:
-                    raise TimeoutError("MLX worker did not start request in time")
-
-                if message.get("type") == "eof":
-                    raise RuntimeError("MLX worker exited unexpectedly")
-
-                if message.get("id") != req_id:
-                    continue
-
-                msg_type = message.get("type")
-                if msg_type == "started":
-                    last_heartbeat = time.time()
-                    break
-                if msg_type == "result":
-                    error = message.get("error")
-                    if error:
-                        raise RuntimeError(str(error))
-                    return str(message.get("text") or "").strip()
-
-            deadline = time.time() + timeout_s if timeout_s > 0 else None
-            while True:
-                if deadline is not None and time.time() >= deadline:
-                    raise TimeoutError("Timed out waiting for MLX worker response")
-
-                heartbeat_deadline = last_heartbeat + self._HEARTBEAT_TIMEOUT_S
-                wait_for = heartbeat_deadline - time.time()
-                if deadline is not None:
-                    wait_for = min(wait_for, deadline - time.time())
-                if wait_for <= 0:
-                    raise TimeoutError("MLX worker heartbeat stalled")
-
-                try:
-                    message = self._messages.get(timeout=wait_for)
-                except queue.Empty:
-                    raise TimeoutError("MLX worker heartbeat stalled")
-
-                if message.get("type") == "eof":
-                    raise RuntimeError("MLX worker exited unexpectedly")
-                if message.get("id") != req_id:
-                    continue
-
-                msg_type = message.get("type")
-                if msg_type == "heartbeat":
-                    last_heartbeat = time.time()
-                    continue
-                if msg_type == "result":
-                    error = message.get("error")
-                    if error:
-                        raise RuntimeError(str(error))
-                    return str(message.get("text") or "").strip()
+            message = self._wait_for(
+                lambda m: m.get("type") == "result" and m.get("id") == req_id,
+                timeout_s=timeout_s,
+            )
+            if not message:
+                raise TimeoutError("Timed out waiting for MLX worker response")
+            if message.get("type") == "error":
+                raise RuntimeError(message.get("error") or "MLX worker exited unexpectedly")
+            error = message.get("error")
+            if error:
+                raise RuntimeError(str(error))
+            return str(message.get("text") or "").strip()
 
     def _write_line(self, line: str, timeout_s: float) -> None:
         assert self._proc is not None
@@ -568,14 +519,8 @@ class MLXWhisperProvider(TranscriptionProvider):
             self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
         self._cleanup_registered = False
         self._worker_lock = threading.Lock()
-        self._restart_thread: threading.Thread | None = None
-        self._ever_started = False
-        self._shutting_down = False
         self._last_error: str | None = None
         self._last_error_trace: str | None = None
-
-        monitor = threading.Thread(target=self._monitor_worker, daemon=True)
-        monitor.start()
 
     @property
     def name(self) -> str:
@@ -633,14 +578,12 @@ class MLXWhisperProvider(TranscriptionProvider):
                 self._last_error = f"timeout: {e}"
                 self._last_error_trace = None
                 self._stop_worker(force=True)
-                self._schedule_worker_warmup()
                 return None
             except Exception as e:
                 print(f"❌ MLX Whisper Error: {e}")
                 self._last_error = str(e)
                 self._last_error_trace = traceback.format_exc()
                 self._stop_worker(force=True)
-                self._schedule_worker_warmup()
                 return None
 
         if self._mlx_whisper is None:
@@ -673,17 +616,13 @@ class MLXWhisperProvider(TranscriptionProvider):
         """Best-effort cancellation of an in-flight transcription."""
         if self._use_worker:
             self._stop_worker(force=True)
-            self._schedule_worker_warmup()
 
     def _ensure_worker(self) -> None:
         with self._worker_lock:
-            if self._shutting_down:
-                return
             if self._worker is None:
                 self._worker = _MLXWorkerClient(model=self.model)
             if not self._worker.is_running():
                 self._worker.start(startup_timeout_s=self._worker_startup_timeout_s)
-                self._ever_started = True
             if not self._cleanup_registered:
                 atexit.register(self._shutdown)
                 self._cleanup_registered = True
@@ -698,37 +637,7 @@ class MLXWhisperProvider(TranscriptionProvider):
         worker.stop(force=force)
 
     def _shutdown(self) -> None:
-        self._shutting_down = True
         self._stop_worker(force=True)
-
-    def _schedule_worker_warmup(self) -> None:
-        if self._shutting_down:
-            return
-        with self._worker_lock:
-            existing = self._restart_thread
-            if existing and existing.is_alive():
-                return
-            thread = threading.Thread(target=self._warm_worker, daemon=True)
-            self._restart_thread = thread
-            thread.start()
-
-    def _warm_worker(self) -> None:
-        try:
-            self._ensure_worker()
-        except Exception as e:
-            print(f"⚠️  Failed to restart MLX worker: {e}")
-
-    def _monitor_worker(self) -> None:
-        while not self._shutting_down:
-            if self._use_worker and self._ever_started:
-                try:
-                    with self._worker_lock:
-                        worker = self._worker
-                    if worker is not None and not worker.is_running():
-                        self._schedule_worker_warmup()
-                except Exception:
-                    pass
-            time.sleep(0.5)
 
 
 class ParakeetProvider(TranscriptionProvider):
@@ -752,12 +661,6 @@ class ParakeetProvider(TranscriptionProvider):
             self._transcribe_timeout_s = self._TRANSCRIBE_TIMEOUT_S
         self._cleanup_registered = False
         self._worker_lock = threading.Lock()
-        self._restart_thread: threading.Thread | None = None
-        self._ever_started = False
-        self._shutting_down = False
-
-        monitor = threading.Thread(target=self._monitor_worker, daemon=True)
-        monitor.start()
 
     @property
     def name(self) -> str:
@@ -815,28 +718,22 @@ class ParakeetProvider(TranscriptionProvider):
         except TimeoutError:
             print("❌ Parakeet transcription timed out. Restarting worker...")
             self._stop_worker(force=True)
-            self._schedule_worker_warmup()
             return None
         except Exception as e:
             print(f"❌ Parakeet Error: {e}")
             self._stop_worker(force=True)
-            self._schedule_worker_warmup()
             return None
 
     def cancel(self) -> None:
         """Best-effort cancellation of an in-flight transcription."""
         self._stop_worker(force=True)
-        self._schedule_worker_warmup()
 
     def _ensure_worker(self) -> None:
         with self._worker_lock:
-            if self._shutting_down:
-                return
             if self._worker is None:
                 self._worker = _WorkerClient(model=self.model, worker_script="parakeet_worker.py")
             if not self._worker.is_running():
                 self._worker.start(startup_timeout_s=self._worker_startup_timeout_s)
-                self._ever_started = True
             if not self._cleanup_registered:
                 atexit.register(self._shutdown)
                 self._cleanup_registered = True
@@ -844,42 +741,14 @@ class ParakeetProvider(TranscriptionProvider):
     def _stop_worker(self, force: bool = False) -> None:
         with self._worker_lock:
             worker = self._worker
+            if force:
+                self._worker = None
         if worker is None:
             return
         worker.stop(force=force)
 
     def _shutdown(self) -> None:
-        self._shutting_down = True
         self._stop_worker(force=True)
-
-    def _schedule_worker_warmup(self) -> None:
-        if self._shutting_down:
-            return
-        with self._worker_lock:
-            existing = self._restart_thread
-            if existing and existing.is_alive():
-                return
-            thread = threading.Thread(target=self._warm_worker, daemon=True)
-            self._restart_thread = thread
-            thread.start()
-
-    def _warm_worker(self) -> None:
-        try:
-            self._ensure_worker()
-        except Exception as e:
-            print(f"⚠️  Failed to restart Parakeet worker: {e}")
-
-    def _monitor_worker(self) -> None:
-        while not self._shutting_down:
-            if self._ever_started:
-                try:
-                    with self._worker_lock:
-                        worker = self._worker
-                    if worker is not None and not worker.is_running():
-                        self._schedule_worker_warmup()
-                except Exception:
-                    pass
-            time.sleep(0.5)
 
 
 def get_provider(provider_name: str = None) -> TranscriptionProvider:

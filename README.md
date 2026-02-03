@@ -79,8 +79,8 @@ WHISPER_CPP_HTTP_URL=http://localhost:8080
 # Required for cloud mode only
 GROQ_API_KEY=gsk_...
 
-# Audio device (saved automatically after first selection)
-AUDIO_DEVICE=2
+# Audio device (saved automatically after first selection; device name, not index)
+AUDIO_DEVICE=MacBook Pro Microphone
 
 # Language code for transcription
 LANGUAGE=en
@@ -94,6 +94,14 @@ PROMPT=Claude, Anthropic, TypeScript, React, Python
 # Disable audio feedback sounds
 SOUND_ENABLED=true
 ```
+
+## Prompt Overlay (Optional)
+
+STT includes a prompt overlay (triggered by Right Option by default) for quickly pasting common prompts.
+
+Prompts live in:
+
+`~/.config/stt/prompts/*.md`
 
 ### Local Mode (MLX Whisper) — Default
 

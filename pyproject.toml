@@ -38,10 +38,18 @@ source = "vcs"
 version-file = "_version.py"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parakeet_worker.py", "audio_worker.py", "postprocess.py", "overlay.py", "onboarding.py", "prompt_overlay.py", "prompts_config.py"]
+only-include = ["stt.py", "stt_app.py", "stt_config.py", "stt_defaults.py", "recordings.py", "issue_capture.py", "audio_worker_client.py", "text_injector.py", "input_controller.py", "providers.py", "menubar.py", "mlx_worker.py", "parakeet_worker.py", "audio_worker.py", "postprocess.py", "overlay.py", "onboarding.py", "prompt_overlay.py", "prompts_config.py"]
 
 [tool.hatch.build.targets.wheel.sources]
 "stt.py" = "stt.py"
+"stt_app.py" = "stt_app.py"
+"stt_config.py" = "stt_config.py"
+"stt_defaults.py" = "stt_defaults.py"
+"recordings.py" = "recordings.py"
+"issue_capture.py" = "issue_capture.py"
+"audio_worker_client.py" = "audio_worker_client.py"
+"text_injector.py" = "text_injector.py"
+"input_controller.py" = "input_controller.py"
 "providers.py" = "providers.py"
 "menubar.py" = "menubar.py"
 "mlx_worker.py" = "mlx_worker.py"

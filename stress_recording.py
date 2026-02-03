@@ -73,11 +73,14 @@ def main() -> int:
     if args.seed is not None:
         random.seed(args.seed)
 
-    stt.SOUND_ENABLED = False
-    stt.KEEP_RECORDINGS = False
-
-    app = stt.STTApp(device_name=args.device, provider=_DummyProvider())
-    app._overlay = _NullOverlay()
+    app = stt.STTApp(
+        device_name=args.device,
+        provider=_DummyProvider(),
+        overlay=_NullOverlay(),
+        sound_player=lambda _: None,
+        text_injector=lambda *_: None,
+        keep_recordings=False,
+    )
 
     if args.mode == "full":
         app.type_text = lambda *_, **__: None

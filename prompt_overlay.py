@@ -147,7 +147,7 @@ class PromptOverlayView(NSView):
             [NSFontAttributeName, NSForegroundColorAttributeName]
         )
         icon_str = NSAttributedString.alloc().initWithString_attributes_(
-            prompt.icon, icon_attrs
+            (prompt.icon or " "), icon_attrs
         )
         icon_x = rect.origin.x + 8
         icon_y = rect.origin.y + (rect.size.height - 24) / 2
