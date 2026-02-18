@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -76,6 +77,8 @@ class InputController:
         self._shift_held = False
         self._send_enter_flag = False
         self._prompt_overlay_active = False
+        self._toggle_mode = os.environ.get("TOGGLE_MODE", "false").lower() == "true"
+        self._toggle_recording = False  # True when recording via toggle (waiting for second tap)
 
         self._trigger_key = keyboard.Key.cmd_r
         self._trigger_is_shift = False
@@ -171,6 +174,10 @@ class InputController:
 
             if key == trigger_key:
                 with self._lock:
+                    if self._toggle_mode:
+                        # Toggle mode: press is just noted, action happens on release
+                        self._key_pressed = True
+                        return
                     if self._key_pressed and not self._app.recording and not self._app._starting:
                         self._key_pressed = False
                         self._send_enter_flag = False
@@ -205,6 +212,7 @@ class InputController:
                         self._mouse_pressed = False
                         self._send_enter_flag = False
                         self._record_source = None
+                        self._toggle_recording = False
                     threading.Thread(target=self._app.cancel_recording, daemon=True).start()
                 else:
                     threading.Thread(target=self._app.cancel_transcription, daemon=True).start()
@@ -261,6 +269,26 @@ class InputController:
                     if not self._key_pressed:
                         return
                     self._key_pressed = False
+
+                    if self._toggle_mode:
+                        if not self._toggle_recording:
+                            # First tap: start recording
+                            self._toggle_recording = True
+                            self._record_source = "keyboard"
+                            self._send_enter_flag = self._shift_held and not trigger_is_shift
+                            if self._send_enter_flag:
+                                self._app._overlay.set_shift_held(True)
+                            threading.Thread(target=self._app.start_recording, daemon=True).start()
+                            return
+                        else:
+                            # Second tap: stop and process
+                            self._toggle_recording = False
+                            send_enter = self._send_enter_flag
+                            self._send_enter_flag = False
+                            self._record_source = None
+                            threading.Thread(target=self._app.process_recording, args=(send_enter,)).start()
+                            return
+
                     send_enter = self._send_enter_flag
                     self._send_enter_flag = False
                     self._record_source = None
@@ -311,6 +339,9 @@ class InputController:
                     continue
                 with self._lock:
                     if self._record_source != "keyboard":
+                        continue
+                    if self._toggle_mode and self._toggle_recording:
+                        # In toggle mode, don't force-stop — wait for second tap
                         continue
                     trigger_flag_mask = self._trigger_flag_mask
                     if trigger_flag_mask is None:
