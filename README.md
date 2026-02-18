@@ -1,20 +1,48 @@
-# STT
+# STT (Toggle Mode Fork)
 
-**Like SuperWhisper, but free. Like Wispr Flow, but local.**
+> Fork of [bokan/stt](https://github.com/bokan/stt) with **hands-free toggle mode** — tap once to start recording, tap again to stop. No need to hold a key down.
 
-Hold a key, speak, release — your words appear wherever your cursor is. Built for vibe coding and conversations with AI agents.
+**Like SuperWhisper, but free. Like Wispr Flow, but local. Now truly hands-free.**
+
+Tap a key, speak as long as you want, tap again — your words appear wherever your cursor is. Built for vibe coding and long-form dictation to AI agents like Claude Code.
 
 ![Demo](demo.gif)
 
 - **Free & open source** — no subscription, no cloud dependency
 - **Runs locally** on Apple Silicon via MLX Whisper or Parakeet
-- **Or use cloud** (Groq) when you prefer
-- **One command install** — `uv tool install git+https://github.com/bokan/stt.git`
+- **Toggle mode** — tap to start, tap to stop (no holding keys down)
+- **Long recordings** — dictate for minutes, not just seconds
+- **One command install** — `uv tool install git+https://github.com/cyberkenn/stt.git`
 
-## Features
+## What This Fork Adds
+
+### Toggle Mode (`TOGGLE_MODE=true`)
+
+Upstream stt requires **holding** the hotkey while speaking. This fork adds a **tap-toggle** alternative:
+
+| Mode | Workflow | Best for |
+|---|---|---|
+| Hold (upstream default) | Hold key → speak → release | Short commands |
+| **Toggle (this fork)** | Tap key → speak hands-free → tap key | Long dictation, accessibility |
+
+Enable it by adding to `~/.config/stt/.env`:
+```bash
+TOGGLE_MODE=true
+```
+
+**How it works:**
+1. **Tap** the hotkey (e.g., Right Option) — recording starts, you hear a sound
+2. **Speak** as long as you want — hands completely free
+3. **Tap** the hotkey again — recording stops, audio is transcribed, text appears at cursor
+4. **Esc** — cancel recording at any time
+5. **Hold Shift** during the second tap — auto-presses Enter after typing (submit to Claude Code)
+
+Set `TOGGLE_MODE=false` (or remove it) to use the original hold-to-record behavior.
+
+## All Features
 
 - **Global hotkey** — works in any application, configurable trigger key
-- **Hold-to-record** — no start/stop buttons, just hold and speak
+- **Toggle or hold-to-record** — choose your preferred recording style
 - **Auto-type** — transcribed text is typed directly into the active field
 - **Shift+record** — automatically sends Enter after typing (great for chat interfaces)
 - **Audio feedback** — subtle system sounds confirm recording state (can be disabled)
@@ -32,6 +60,10 @@ Hold a key, speak, release — your words appear wherever your cursor is. Built 
 ## Installation
 
 ```bash
+# This fork (with toggle mode):
+uv tool install git+https://github.com/cyberkenn/stt.git
+
+# Or upstream (hold-to-record only):
 uv tool install git+https://github.com/bokan/stt.git
 ```
 
@@ -40,7 +72,7 @@ On first run, a setup wizard will guide you through configuration.
 To update:
 
 ```bash
-uv tool install --reinstall git+https://github.com/bokan/stt.git
+uv tool install --reinstall git+https://github.com/cyberkenn/stt.git
 ```
 
 ## Permissions
@@ -60,8 +92,9 @@ stt
 
 | Action | Keys |
 |--------|------|
-| Record | Hold **Right Command** (default) |
-| Record + Enter | Hold **Shift** while recording |
+| Record (hold mode) | Hold **Right Command** (default) |
+| Record (toggle mode) | Tap **Right Command** to start, tap again to stop |
+| Record + Enter | Hold **Shift** while recording (hold) or during second tap (toggle) |
 | Cancel recording / stuck transcription | **ESC** |
 | Quit | **Ctrl+C** |
 
@@ -93,6 +126,12 @@ PROMPT=Claude, Anthropic, TypeScript, React, Python
 
 # Disable audio feedback sounds
 SOUND_ENABLED=true
+
+# Toggle mode: tap to start/stop instead of hold (this fork only)
+TOGGLE_MODE=true
+
+# Transcription timeout in seconds (increase for long recordings)
+WHISPER_TIMEOUT_S=600
 ```
 
 ## Prompt Overlay (Optional)
@@ -181,10 +220,20 @@ PROMPT=TypeScript, React, useState, async await, API endpoint
 PROMPT=Claude, Anthropic, OpenAI, Groq, LLM, GPT
 ```
 
+## Syncing with Upstream
+
+This fork tracks [bokan/stt](https://github.com/bokan/stt). To pull in upstream updates:
+
+```bash
+git fetch upstream
+git merge upstream/master
+git push
+```
+
 ## Development
 
 ```bash
-git clone https://github.com/bokan/stt.git
+git clone https://github.com/cyberkenn/stt.git
 cd stt
 uv sync
 uv run stt
@@ -192,4 +241,4 @@ uv run stt
 
 ## License
 
-MIT
+MIT — same as upstream. See [LICENSE](LICENSE).
